@@ -1,0 +1,5 @@
+# Python >=3.10. Preinstalled packages or network-installed wheels are supported.
+# Install with: python -m pip install --only-binary=:all: -r requirements.txt
+python-docx>=1.2.0
+lxml>=5.0
+defusedxml>=0.7.1

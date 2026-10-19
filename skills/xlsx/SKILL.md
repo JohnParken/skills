@@ -6,6 +6,26 @@ license: Proprietary. LICENSE.txt has complete terms
 
 # XLSX creation, editing, and analysis
 
+## Execution modes
+
+These are agent workflow modes, not CLI flags or automatic script fallbacks.
+Before authoring, check `shutil.which('soffice')`. If it is absent, select
+**restricted mode** without attempting LibreOffice commands. If present, use
+**full mode** provisionally; the actual requested operation must succeed and
+produce its expected output before reporting it as verified. Do not run an
+unrelated conversion just to test availability. If an operation fails, retain
+its diagnostics and distinguish an unusable runtime from a malformed input;
+fix file defects rather than concealing them through restricted mode.
+In restricted mode, continue generation/editing and available content,
+structure, and formula-reference checks, but skip unavailable recalculation.
+Preserve formulas; never invent cached results or substitute hardcoded values.
+Missing caches are not zero, and old caches do not prove fresh calculation.
+For files containing formulas, state `公式未重算` and the reason in the delivery
+message; do not add this notice inside the workbook unless requested. Report
+requested fresh formula results or complete verification as incomplete. Files
+without formulas need no recalculation or formula warning. Known formula errors
+must still be addressed; restricted mode never turns an error into a pass.
+
 | Task | Approach |
 |---|---|
 | **Create** or **edit** with formulas/formatting | `openpyxl` — see gotchas below |
@@ -20,14 +40,14 @@ license: Proprietary. LICENSE.txt has complete terms
 ## Requirements for every output
 
 - **Professional font** (Arial, Times New Roman) throughout, unless the user says otherwise.
-- **Zero formula errors.** Never ship while `recalc.py` reports `errors_found`. If you think an error predates you, prove it: load the *original* with `data_only=True` and look at that cell. An error you introduced looks exactly like one you inherited.
+- **Zero known formula errors in either mode.** Never ship while `recalc.py` reports `errors_found`. In restricted mode, cached errors can still be checked, but formulas whose results were not recalculated remain unverified. If you think an error predates you, prove it: load the *original* with `data_only=True` and look at that cell. An error you introduced looks exactly like one you inherited.
 - **Use formulas, never hardcoded results.** Write `sheet['B10'] = '=SUM(B2:B9)'`, not the Python-computed total. The sheet must recalculate when its inputs change.
 - **Follow the user's spec literally.** Exact tab names, exact column headers, and the formula they spelled out. A redesign that computes something else fails, however elegant.
 - **Document every assumption and hardcoded number** where the reader will see it — a cell comment, or an adjacent cell at a table's end. Cite a real source when one exists (`Source: Company 10-K, FY2024, Page 45, Revenue Note, [SEC EDGAR URL]`); when the number came from the user, say so plainly.
 - **A workbook *you create* for someone to fill in** needs a short legend naming which cells to edit, and one example row of realistic values showing the expected format. Never add such a row to a file you were asked to edit.
 - **Editing an existing file: match its conventions exactly.** They override every guideline here. Find its designated input cells first — a distinct font color, fill, or shading marks them — write only there, and leave every existing formula untouched.
 
-## Recalculate (mandatory whenever the file contains formulas)
+## Recalculate (required in full mode whenever the file contains formulas)
 
 openpyxl writes formulas as strings with **no cached values**. Until you recalculate, every
 formula cell reads back as `None` to anything reading cached values — `pandas`,
@@ -96,4 +116,14 @@ lone edited cell mid-row is the commonest silent error · guard denominators tha
 
 ## Dependencies
 
-`openpyxl`, `pandas`, `markitdown` (pip, preinstalled — install only if an import fails or the command is missing) · LibreOffice (`soffice`, auto-configured for sandboxed environments via `scripts/office/soffice.py`)
+`openpyxl`, `pandas`, `markitdown` (pip, preinstalled — install only if an import fails or the command is missing) · LibreOffice (`soffice`, required for fresh recalculation; wrapper: `scripts/office/soffice.py`). Restricted mode supports generation/editing and workbook/formula inspection, but computed results remain unverified.
+
+
+### Offline XML schemas
+
+The bundled Office schemas include the complete Dublin Core dependency chain.
+Keep `scripts/office/schemas/` intact when copying this skill: core properties
+use local relative XSD imports, and the schema loader disables network access.
+No schema downloads are required at runtime. Source URLs and SHA-256 hashes
+are recorded in `scripts/office/schemas/ecma/fouth-edition/dublin-core/README.md`.
+Schema checks work offline; fresh formula recalculation needs usable LibreOffice.

@@ -5,8 +5,8 @@ Usage:
     python validate.py <path> [--original <original_file>] [--auto-repair] [--author NAME]
 
 The first argument can be either:
-- An unpacked directory containing the Office document XML files
-- A packed Office file (.docx/.pptx/.xlsx or .dotx/.potx/.xltx template) which will be unpacked to a temp directory
+- An unpacked directory containing the Word document XML files
+- A packed Word file (.docx or .dotx template), which will be unpacked to a temp directory
 
 Auto-repair fixes:
 - paraId/durableId values that exceed OOXML limits
@@ -23,7 +23,7 @@ import defusedxml.ElementTree as ET
 from defusedxml.common import DefusedXmlException
 
 from helpers import OOXML_FAMILY, rezip, safe_extract
-from validators import DOCXSchemaValidator, PPTXSchemaValidator, RedliningValidator
+from validators import DOCXSchemaValidator, RedliningValidator
 
 WORD_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 
@@ -46,16 +46,16 @@ def _has_tracked_changes(unpacked_dir: Path) -> bool:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Validate Office document XML files")
+    parser = argparse.ArgumentParser(description="Validate Word document XML files")
     parser.add_argument(
         "path",
-        help="Path to unpacked directory or packed Office file (.docx/.pptx/.xlsx or .dotx/.potx/.xltx)",
+        help="Path to unpacked directory or packed Word file (.docx or .dotx)",
     )
     parser.add_argument(
         "--original",
         required=False,
         default=None,
-        help="Path to original file (.docx/.pptx/.xlsx or .dotx/.potx/.xltx). If omitted, all XSD errors are reported and redlining validation is skipped.",
+        help="Path to original Word file (.docx or .dotx). If omitted, all XSD errors are reported and redlining validation is skipped.",
     )
     parser.add_argument(
         "-v",
@@ -87,6 +87,9 @@ def main():
     path = Path(args.path)
     if not path.exists():
         _fail(f"{path} does not exist")
+
+    if path.is_file() and path.suffix.lower() not in OOXML_FAMILY:
+        _fail(f"Packed input {path} must be a .docx or .dotx file")
 
     original_file = None
     if args.original:
@@ -135,17 +138,6 @@ def main():
                     "Note: this document has tracked changes; they were not "
                     "checked against the original (pass --author to check)."
                 )
-        case "pptx":
-            validators = [
-                PPTXSchemaValidator(unpacked_dir, original_file, verbose=args.verbose),
-            ]
-        case "xlsx":
-            exts = ", ".join(k for k, v in sorted(OOXML_FAMILY.items()) if v == "xlsx")
-            print(
-                f"No XSD schema validation is performed for xlsx-family files ({exts}). "
-                "For formula-error checking, use scripts/recalc.py instead."
-            )
-            sys.exit(0)
         case _:
             print(f"Error: Validation not supported for file type {family}")
             sys.exit(1)

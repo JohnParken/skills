@@ -10,16 +10,9 @@ from pathlib import Path
 OOXML_FAMILY = {
     ".docx": "docx",
     ".dotx": "docx",
-    ".pptx": "pptx",
-    ".potx": "pptx",
-    ".xlsx": "xlsx",
-    ".xltx": "xlsx",
 }
 
 _SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.\-]*:")
-
-SLIDE_REL_TYPE = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide"
-
 
 def opc_target(target: str, source_part: str, target_mode: str = "") -> str | None:
     if not target:

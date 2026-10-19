@@ -37,7 +37,7 @@ from xml.sax.saxutils import escape as xml_escape
 
 from office.helpers import opc_target, rezip as _rezip, safe_extract as _safe_extract
 
-TEMPLATE_DIR = Path(__file__).parent / "templates"
+TEMPLATE_DIR = Path(__file__).resolve().parents[1] / "assets" / "comments"
 NS = {
     "w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main",
     "w14": "http://schemas.microsoft.com/office/word/2010/wordml",

@@ -18,7 +18,7 @@ rewrite tracked-change structure, collapsing separate revisions into one.
 Only word/document.xml is processed (not headers, footers, or footnotes).
 
 Usage:
-    python merge_runs.py unpacked/                  # after unzip, before editing
+    python merge_runs.py unpacked/                  # after Python unpacking, before editing
     python merge_runs.py document.docx              # rewrite in place
     python merge_runs.py document.docx -o out.docx
 """

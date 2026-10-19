@@ -15,10 +15,11 @@ from helpers import safe_extract
 
 @lru_cache(maxsize=None)
 def _load_schema(schema_path: str):
-    with open(schema_path, "rb") as xsd_file:
-        xsd_doc = lxml.etree.parse(
-            xsd_file, parser=lxml.etree.XMLParser(), base_url=schema_path
-        )
+    # All schema dependencies are bundled; never resolve imports over the network.
+    parser = lxml.etree.XMLParser(
+        no_network=True, resolve_entities=False, load_dtd=False
+    )
+    xsd_doc = lxml.etree.parse(str(Path(schema_path).resolve()), parser=parser)
     return lxml.etree.XMLSchema(xsd_doc)
 
 class BaseSchemaValidator:

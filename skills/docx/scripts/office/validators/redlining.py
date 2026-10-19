@@ -11,7 +11,7 @@ Only the document body is compared. Headers, footers, footnotes and endnotes
 are separate parts and are not checked.
 """
 
-import subprocess
+import difflib
 import tempfile
 import zipfile
 from pathlib import Path
@@ -170,84 +170,30 @@ class RedliningValidator:
             "",
         ]
 
-        git_diff = self._get_git_word_diff(original_text, modified_text)
-        if git_diff:
-            error_parts.extend(["Differences:", "============", git_diff])
-        else:
-            error_parts.append("Unable to generate word diff (git not available)")
+        text_diff = self._get_text_diff(original_text, modified_text)
+        error_parts.extend(["Differences:", "============", text_diff])
 
         return "\n".join(error_parts)
 
-    def _get_git_word_diff(self, original_text, modified_text):
-        try:
-            with tempfile.TemporaryDirectory() as temp_dir:
-                temp_path = Path(temp_dir)
-
-                original_file = temp_path / "original.txt"
-                modified_file = temp_path / "modified.txt"
-
-                original_file.write_text(original_text, encoding="utf-8")
-                modified_file.write_text(modified_text, encoding="utf-8")
-
-                result = subprocess.run(
-                    [
-                        "git",
-                        "diff",
-                        "--word-diff=plain",
-                        "--word-diff-regex=.",  
-                        "-U0",  
-                        "--no-index",
-                        str(original_file),
-                        str(modified_file),
-                    ],
-                    capture_output=True,
-                    text=True,
-                )
-
-                if result.stdout.strip():
-                    lines = result.stdout.split("\n")
-                    content_lines = []
-                    in_content = False
-                    for line in lines:
-                        if line.startswith("@@"):
-                            in_content = True
-                            continue
-                        if in_content and line.strip():
-                            content_lines.append(line)
-
-                    if content_lines:
-                        return "\n".join(content_lines)
-
-                result = subprocess.run(
-                    [
-                        "git",
-                        "diff",
-                        "--word-diff=plain",
-                        "-U0",  
-                        "--no-index",
-                        str(original_file),
-                        str(modified_file),
-                    ],
-                    capture_output=True,
-                    text=True,
-                )
-
-                if result.stdout.strip():
-                    lines = result.stdout.split("\n")
-                    content_lines = []
-                    in_content = False
-                    for line in lines:
-                        if line.startswith("@@"):
-                            in_content = True
-                            continue
-                        if in_content and line.strip():
-                            content_lines.append(line)
-                    return "\n".join(content_lines)
-
-        except (subprocess.CalledProcessError, FileNotFoundError, Exception):
-            pass
-
-        return None
+    def _get_text_diff(self, original_text, modified_text):
+        """Return a standard-library unified diff for the text mismatch."""
+        diff = "\n".join(
+            difflib.unified_diff(
+                original_text.splitlines(),
+                modified_text.splitlines(),
+                fromfile="original",
+                tofile="modified",
+                lineterm="",
+            )
+        )
+        if not diff and original_text != modified_text:
+            # splitlines() intentionally presents readable lines, but that
+            # normalization can hide a difference in final newline presence.
+            return (
+                "--- original\n+++ modified\n"
+                f"- {original_text!r}\n+ {modified_text!r}"
+            )
+        return diff
 
     def _remove_tracked_changes(self, root, targets):
         ins_tag = f"{{{self.namespaces['w']}}}ins"

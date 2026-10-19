@@ -15,10 +15,11 @@ from helpers import safe_extract
 
 @lru_cache(maxsize=None)
 def _load_schema(schema_path: str):
-    with open(schema_path, "rb") as xsd_file:
-        xsd_doc = lxml.etree.parse(
-            xsd_file, parser=lxml.etree.XMLParser(), base_url=schema_path
-        )
+    # All schema dependencies are bundled; never resolve imports over the network.
+    parser = lxml.etree.XMLParser(
+        no_network=True, resolve_entities=False, load_dtd=False
+    )
+    xsd_doc = lxml.etree.parse(str(Path(schema_path).resolve()), parser=parser)
     return lxml.etree.XMLSchema(xsd_doc)
 
 class BaseSchemaValidator:
@@ -53,21 +54,19 @@ class BaseSchemaValidator:
     ELEMENT_RELATIONSHIP_TYPES = {}
 
     SCHEMA_MAPPINGS = {
-        "word": "ISO-IEC29500-4_2016/wml.xsd",  
-        "ppt": "ISO-IEC29500-4_2016/pml.xsd",  
-        "xl": "ISO-IEC29500-4_2016/sml.xsd",  
+        "word": "office-standard/wml.xsd",
         "[Content_Types].xml": "ecma/fouth-edition/opc-contentTypes.xsd",
-        "app.xml": "ISO-IEC29500-4_2016/shared-documentPropertiesExtended.xsd",
+        "app.xml": "office-standard/shared-documentPropertiesExtended.xsd",
         "core.xml": "ecma/fouth-edition/opc-coreProperties.xsd",
-        "custom.xml": "ISO-IEC29500-4_2016/shared-documentPropertiesCustom.xsd",
+        "custom.xml": "office-standard/shared-documentPropertiesCustom.xsd",
         ".rels": "ecma/fouth-edition/opc-relationships.xsd",
         "people.xml": "microsoft/wml-2012.xsd",
         "commentsIds.xml": "microsoft/wml-cid-2016.xsd",
         "commentsExtensible.xml": "microsoft/wml-cex-2018.xsd",
         "commentsExtended.xml": "microsoft/wml-2012.xsd",
-        "chart": "ISO-IEC29500-4_2016/dml-chart.xsd",
-        "theme": "ISO-IEC29500-4_2016/dml-main.xsd",
-        "drawing": "ISO-IEC29500-4_2016/dml-main.xsd",
+        "chart": "office-standard/dml-chart.xsd",
+        "theme": "office-standard/dml-main.xsd",
+        "drawing": "office-standard/dml-main.xsd",
     }
 
     MC_NAMESPACE = "http://schemas.openxmlformats.org/markup-compatibility/2006"
@@ -83,7 +82,7 @@ class BaseSchemaValidator:
         "http://schemas.openxmlformats.org/package/2006/content-types"
     )
 
-    MAIN_CONTENT_FOLDERS = {"word", "ppt", "xl"}
+    MAIN_CONTENT_FOLDERS = {"word"}
 
     OOXML_NAMESPACES = {
         "http://schemas.openxmlformats.org/officeDocument/2006/math",
@@ -108,7 +107,7 @@ class BaseSchemaValidator:
         self.original_file = Path(original_file) if original_file else None
         self.verbose = verbose
 
-        self.schemas_dir = Path(__file__).parent.parent / "schemas"
+        self.schemas_dir = Path(__file__).resolve().parents[3] / "assets" / "schemas"
 
         patterns = ["*.xml", "*.rels"]
         self.xml_files = [
