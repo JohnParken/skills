@@ -16,10 +16,12 @@ import tempfile
 import zipfile
 from pathlib import Path
 
-import defusedxml.ElementTree as ET
-from defusedxml.common import DefusedXmlException
-
-from helpers import rendered_text, safe_extract
+try:
+    from .. import xmlio as ET
+    from ..helpers import rendered_text, safe_extract
+except ImportError:
+    import xmlio as ET
+    from helpers import rendered_text, safe_extract
 
 
 class RedliningValidator:
@@ -63,7 +65,7 @@ class RedliningValidator:
                 modified_root = modified_tree.getroot()
                 original_tree = ET.parse(original_file)
                 original_root = original_tree.getroot()
-            except (ET.ParseError, DefusedXmlException) as e:
+            except ET.ParseError as e:
                 print(f"FAILED - Error parsing XML files: {e}")
                 return False
 

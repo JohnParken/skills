@@ -13,10 +13,13 @@ import tempfile
 import zipfile
 from pathlib import Path
 
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+
 try:
-    from .helpers import rezip, safe_extract
+    from .helpers import check_archive, rezip, safe_extract
 except ImportError:
-    from helpers import rezip, safe_extract
+    from helpers import check_archive, rezip, safe_extract
 
 
 REQUIRED_PARTS = ("[Content_Types].xml", "_rels/.rels", "word/document.xml")
@@ -47,9 +50,7 @@ def unpack_document(source: str | Path, destination: str | Path) -> Path:
         staging = Path(tmp) / "package"
         staging.mkdir()
         with zipfile.ZipFile(source) as archive:
-            names = archive.namelist()
-            if len(names) != len(set(names)):
-                raise ValueError("Duplicate ZIP members are unsupported")
+            check_archive(archive)
             bad_member = archive.testzip()
             if bad_member:
                 raise ValueError(f"Corrupt ZIP member: {bad_member}")

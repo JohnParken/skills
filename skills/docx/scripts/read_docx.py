@@ -8,8 +8,11 @@ import zipfile
 from pathlib import Path
 from xml.etree.ElementTree import Element
 
-from defusedxml import ElementTree as SafeET
-from defusedxml.common import DefusedXmlException
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from office import xmlio as SafeET
+from office.helpers import check_archive, read_part
 
 W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 _REVISION_TAGS = {
@@ -102,8 +105,9 @@ def read_docx(path: str | Path, *, revisions: str = "accepted", include_related:
         raise ValueError("revisions must be 'accepted', 'original', or 'all'")
     try:
         with zipfile.ZipFile(path) as package:
+            check_archive(package)
             try:
-                document = SafeET.fromstring(package.read("word/document.xml"))
+                document = SafeET.fromstring(read_part(package, "word/document.xml"))
             except KeyError as exc:
                 raise ValueError("DOCX package is missing word/document.xml") from exc
             if document.tag != _tag("document"):
@@ -123,11 +127,11 @@ def read_docx(path: str | Path, *, revisions: str = "accepted", include_related:
                 )
                 for label, prefix in categories:
                     for part in sorted(n for n in names if n.startswith(prefix) and n.endswith(".xml")):
-                        root = SafeET.fromstring(package.read(part))
+                        root = SafeET.fromstring(read_part(package, part))
                         text = _part_text(root, part, revisions)
                         if text.strip():
                             pieces.extend((f"[{label}: {part}]", text))
-    except (SafeET.ParseError, DefusedXmlException) as exc:
+    except SafeET.ParseError as exc:
         raise ValueError(f"invalid or unsafe XML in DOCX package: {exc}") from exc
     except (zipfile.BadZipFile, OSError) as exc:
         raise ValueError(f"cannot read DOCX package: {exc}") from exc

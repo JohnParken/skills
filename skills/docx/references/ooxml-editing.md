@@ -31,10 +31,28 @@
 </w:ins>
 ```
 
-处理删除的段落标记时，将 `w:del` 放入 `w:pPr/w:rPr`，位于该 `rPr` 的其他子节点之前；按 XSD 顺序检查。理解其接受后的语义是与下一段合并；不要仅清空文字而声称段落已被删除。
+不要自动处理删除的段落标记、移动修订或格式修订；保留已有结构并报告超出支持范围。禁止仅清空文字而声称段落已被删除。
 
-使用 `scripts/office/validate.py edited.docx --original input.docx --author Editor` 检查遗漏的未追踪正文文字修改。将示例路径按 skill 根目录解析；不要声称该检查覆盖全部部件、格式变更或段落合并语义。
+使用文末修订对比命令检查遗漏的未追踪正文文字修改。将脚本路径按 skill 根目录解析，将文档放在独立工作目录；不要声称该检查覆盖全部部件、格式变更或段落合并语义。
 
 保留原作者的修订内容和元数据；对其他作者的插入做删除时，在其 `w:ins` 内嵌套自己的 `w:del`。恢复其删除时，在原 `w:del` 后添加自己的 `w:ins`；不要直接重写其他作者的修订历史。
 
 禁止将提取器的 `accepted` 文本视图声称为保存后的净稿；完整修订接受和拒绝不在本 skill 的支持范围内。
+
+## 使用低层辅助工具
+
+从 skill 根目录调用脚本，将 `../docx-work/` 替换为实际的独立工作目录；修改前保留源文件，完成后执行基础检查：
+
+```console
+python -I -S -B scripts/comment.py ../docx-work/input.docx "核对费用上限" -o ../docx-work/annotated.docx
+python -I -S -B scripts/merge_runs.py ../docx-work/input.docx -o ../docx-work/merged.docx
+python -I -S -B scripts/office/validate.py ../docx-work/edited.docx --original ../docx-work/input.docx --author Editor
+```
+
+添加批注定义后，先补正文锚点再验收。当前基础检查仅支持有起点、终点和引用的范围批注，不支持无范围的点批注，也不验证完整线程回复语义；不要把生成批注部件声称为已验证阅读器中的显示效果。
+
+仅在明确理解原结构时合并相邻且格式相同的 run；该脚本会改写 `word/document.xml`、移除校对标记和 run 的 rsid，不处理其他部件。不要为了让受控替换通过而盲目合并复杂结构。
+
+保留命名空间声明、元素顺序、关系引用和 `xml:space`；禁止重新排版整个 XML 或删除未知扩展。使用 `scripts/office/xmlio.py` 中的受限解析入口，不要直接用默认解析器处理外来 XML。
+
+修订对比仅比较正文文字及有限的插入/删除标记，不检查所有格式、段落合并、移动、页眉页脚、字段、制表符或换行语义。指定 `--original` 不会豁免结构错误，校验器不提供自动修复或 XSD 检查。

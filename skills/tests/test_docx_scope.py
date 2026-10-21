@@ -18,12 +18,14 @@ class DocxScopeTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory(prefix="docx-scope-")
         self.addCleanup(self.temp.cleanup)
         self.work = Path(self.temp.name)
-        self.env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
+        self.env = dict(os.environ, PATH="", PYTHONDONTWRITEBYTECODE="1")
         self.original = self.work / "output.docx"
         instructions = (ROOT / "docx" / "SKILL.md").read_text(encoding="utf-8")
-        example = re.search(r"```python\n(.*?)```", instructions, re.S).group(1)
+        example = re.search(r"```json\n(.*?)```", instructions, re.S).group(1)
+        spec = self.work / "document.json"
+        spec.write_text(example, encoding="utf-8")
         result = subprocess.run(
-            [sys.executable, "-B", "-c", example], cwd=self.work,
+            [sys.executable, "-I", "-S", "-B", str(ROOT / "docx/scripts/create_docx.py"), str(spec), str(self.original)], cwd=self.work,
             env=self.env, capture_output=True, text=True,
         )
         if result.returncode != 0:
@@ -31,7 +33,7 @@ class DocxScopeTests(unittest.TestCase):
 
     def run_cli(self, *args):
         return subprocess.run(
-            [sys.executable, "-B", str(VALIDATE), *map(str, args)],
+            [sys.executable, "-I", "-S", "-B", str(VALIDATE), *map(str, args)],
             cwd=self.work, env=self.env, capture_output=True, text=True,
         )
 
@@ -49,7 +51,7 @@ class DocxScopeTests(unittest.TestCase):
         docx.write_bytes(self.original.read_bytes())
         docx_result = self.run_cli(docx)
         self.assertEqual(docx_result.returncode, 0, docx_result.stdout + docx_result.stderr)
-        self.assertIn("All validations PASSED!", docx_result.stdout)
+        self.assertIn("Basic structure checks PASSED.", docx_result.stdout)
 
         dotx = self.work / "input.dotx"
         document_content_type = (
@@ -70,7 +72,7 @@ class DocxScopeTests(unittest.TestCase):
                 target.writestr(entry, data)
         dotx_result = self.run_cli(dotx)
         self.assertEqual(dotx_result.returncode, 0, dotx_result.stdout + dotx_result.stderr)
-        self.assertIn("All validations PASSED!", dotx_result.stdout)
+        self.assertIn("Basic structure checks PASSED.", dotx_result.stdout)
 
     def test_accepts_unpacked_directory_with_docx_original(self):
         unpacked = self.work / "unpacked"
@@ -79,7 +81,7 @@ class DocxScopeTests(unittest.TestCase):
             package.extractall(unpacked)
         result = self.run_cli(unpacked, "--original", self.original)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("All validations PASSED!", result.stdout)
+        self.assertIn("Basic structure checks PASSED.", result.stdout)
 
 
 if __name__ == "__main__":

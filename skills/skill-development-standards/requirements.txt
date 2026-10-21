@@ -1,0 +1,2 @@
+# No third-party dependencies. Use Python >=3.10 and its standard library.
+# Do not install packages to run the skill checker or its unit tests.

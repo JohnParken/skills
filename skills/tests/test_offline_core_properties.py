@@ -11,7 +11,7 @@ from lxml import etree
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SKILLS = ("docx", "xlsx", "pptx")
+SKILLS = ("xlsx", "pptx")
 XSD_NS = "http://www.w3.org/2001/XMLSchema"
 CORE_NS = "http://schemas.openxmlformats.org/package/2006/metadata/core-properties"
 DC_NS = "http://purl.org/dc/elements/1.1/"
@@ -19,7 +19,7 @@ DCTERMS_NS = "http://purl.org/dc/terms/"
 
 
 def schema_root(skill):
-    return ROOT / skill / ("assets/schemas" if skill == "docx" else "scripts/office/schemas")
+    return ROOT / skill / "scripts/office/schemas"
 
 
 class RejectRemoteResolver(etree.Resolver):

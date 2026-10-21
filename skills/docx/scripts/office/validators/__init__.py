@@ -1,13 +1,6 @@
-"""
-Validation modules for Word document processing.
-"""
+"""Standard-library structural rules and bounded body text revision checks."""
 
-from .base import BaseSchemaValidator
-from .docx import DOCXSchemaValidator
+from .structure import StructureValidator
 from .redlining import RedliningValidator
 
-__all__ = [
-    "BaseSchemaValidator",
-    "DOCXSchemaValidator",
-    "RedliningValidator",
-]
+__all__ = ["StructureValidator", "RedliningValidator"]

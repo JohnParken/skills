@@ -1,6 +1,6 @@
 """Exercise documented DOCX workflows with no executable search path."""
 
-import importlib.util
+import json
 import os
 import re
 import stat
@@ -11,8 +11,7 @@ import unittest
 import zipfile
 from pathlib import Path
 
-from docx import Document
-from lxml import etree
+from xml.etree import ElementTree as etree
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "docx" / "scripts"
@@ -29,9 +28,11 @@ class PythonOnlyDocxTests(unittest.TestCase):
         self.work = Path(self.temp.name)
         self.env = dict(os.environ, PATH="", PYTHONDONTWRITEBYTECODE="1")
         instructions = (ROOT / "docx" / "SKILL.md").read_text(encoding="utf-8")
-        example = re.search(r"```python\n(.*?)```", instructions, re.S).group(1)
+        example = re.search(r"```json\n(.*?)```", instructions, re.S).group(1)
+        spec = self.work / "document.json"
+        spec.write_text(example, encoding="utf-8")
         result = subprocess.run(
-            [sys.executable, "-B", "-c", example], cwd=self.work,
+            [sys.executable, "-I", "-S", "-B", str(SCRIPTS / "create_docx.py"), str(spec), str(self.work / "output.docx")], cwd=self.work,
             env=self.env, capture_output=True, text=True,
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -39,7 +40,7 @@ class PythonOnlyDocxTests(unittest.TestCase):
 
     def cli(self, script, *args, expected=0):
         result = subprocess.run(
-            [sys.executable, "-B", str(SCRIPTS / script), *map(str, args)],
+            [sys.executable, "-I", "-S", "-B", str(SCRIPTS / script), *map(str, args)],
             cwd=self.work, env=self.env, capture_output=True, text=True,
         )
         self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
@@ -58,15 +59,16 @@ class PythonOnlyDocxTests(unittest.TestCase):
         edited = self.work / "edited.docx"
         self.cli("office/package.py", "pack", unpacked, edited)
         validation = self.cli("office/validate.py", edited)
-        self.assertIn("All validations PASSED!", validation.stdout)
+        self.assertIn("Basic structure checks PASSED.", validation.stdout)
         text_file = self.work / "content.txt"
         self.cli("read_docx.py", edited, "--include-related", "-o", text_file)
         text = text_file.read_text(encoding="utf-8")
         self.assertIn("团队已完成第二个里程碑。", text)
         self.assertIn("Milestone\tStatus", text)
         self.assertNotIn("The team completed the first milestone.", text)
-        reopened = Document(edited)
-        self.assertEqual(len(reopened.tables), 1)
+        with zipfile.ZipFile(edited) as archive:
+            reopened = etree.fromstring(archive.read("word/document.xml"))
+            self.assertEqual(len(list(reopened.iter(f"{{{W}}}tbl"))), 1)
         with zipfile.ZipFile(self.original) as before, zipfile.ZipFile(edited) as after:
             self.assertIsNone(after.testzip())
             self.assertEqual(set(before.namelist()), set(after.namelist()))
@@ -94,24 +96,21 @@ class PythonOnlyDocxTests(unittest.TestCase):
         extracted = self.cli("read_docx.py", final, "--include-related").stdout
         self.assertIn("核实费用 & 范围", extracted)
 
-    @unittest.skipUnless(importlib.util.find_spec("docxtpl"), "optional docxtpl not installed")
-    def test_optional_template_filling_and_missing_data(self):
-        from docxtpl import DocxTemplate
-        from jinja2 import Environment, StrictUndefined, UndefinedError
-
+    def test_controlled_template_filling_and_missing_data(self):
         template = self.work / "template.docx"
-        document = Document(self.original)
-        document.paragraphs[0].text = "{{ company }}"
-        document.save(template)
-        env = Environment(undefined=StrictUndefined)
-        filled = DocxTemplate(template)
-        filled.render({"company": "ACME & 中文"}, jinja_env=env, autoescape=True)
+        spec = self.work / "template.json"
+        spec.write_text(json.dumps({"blocks": [{"type": "paragraph", "text": "{{ company }}"}]}))
+        self.cli("create_docx.py", spec, template)
+        mapping = self.work / "replacements.json"
+        mapping.write_text(json.dumps({"replacements": [{"old": "{{ company }}", "new": "ACME & 中文"}]}))
         output = self.work / "filled.docx"
-        filled.save(output)
-        self.cli("office/validate.py", output)
+        self.cli("edit_docx.py", template, mapping, output, "--require-no-placeholders")
+        self.cli("office/validate.py", output, "--require-no-placeholders")
         self.assertIn("ACME & 中文", self.cli("read_docx.py", output).stdout)
-        with self.assertRaises(UndefinedError):
-            DocxTemplate(template).render({}, jinja_env=env, autoescape=True)
+        mapping.write_text(json.dumps({"replacements": [{"old": "{{ missing }}", "new": "no"}]}))
+        before = output.read_bytes()
+        self.cli("edit_docx.py", template, mapping, output, expected=1)
+        self.assertEqual(output.read_bytes(), before)
 
     def test_validation_detects_missing_relationship_target(self):
         unpacked = unpack_document(self.original, self.work / "broken")

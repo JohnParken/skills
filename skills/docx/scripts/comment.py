@@ -31,7 +31,10 @@ import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 
-import defusedxml.minidom
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from office.xmlio import parse_dom, read_xml
 from xml.parsers.expat import ExpatError
 from xml.sax.saxutils import escape as xml_escape
 
@@ -45,6 +48,8 @@ NS = {
     "w16cid": "http://schemas.microsoft.com/office/word/2016/wordml/cid",
     "w16cex": "http://schemas.microsoft.com/office/word/2018/wordml/cex",
 }
+REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
+CT_NS = "http://schemas.openxmlformats.org/package/2006/content-types"
 
 COMMENT_XML = """\
 <w:comment w:id="{id}" w:author="{author}" w:date="{date}" w:initials="{initials}">
@@ -98,10 +103,19 @@ def _encode_smart_quotes(text: str) -> str:
 
 
 def _append_xml(xml_path: Path, root_tag: str, content: str) -> None:
-    dom = defusedxml.minidom.parseString(xml_path.read_text(encoding="utf-8"))
-    root = dom.getElementsByTagName(root_tag)[0]
+    dom = parse_dom(read_xml(xml_path))
+    prefix, local = root_tag.split(":", 1)
+    roots = dom.getElementsByTagNameNS(NS[prefix], local)
+    if not roots:
+        raise ValueError(f"Missing expected comment root: {root_tag}")
+    root = roots[0]
+    for key, uri in NS.items():
+        existing = root.getAttribute("xmlns:" + key)
+        if existing and existing != uri:
+            raise ValueError(f"Conflicting namespace prefix: {key}")
+        root.setAttribute("xmlns:" + key, uri)
     ns_attrs = " ".join(f'xmlns:{k}="{v}"' for k, v in NS.items())
-    wrapper_dom = defusedxml.minidom.parseString(f"<root {ns_attrs}>{content}</root>")
+    wrapper_dom = parse_dom(f"<root {ns_attrs}>{content}</root>")
     for child in wrapper_dom.documentElement.childNodes:  
         if child.nodeType == child.ELEMENT_NODE:
             root.appendChild(dom.importNode(child, True))
@@ -110,11 +124,11 @@ def _append_xml(xml_path: Path, root_tag: str, content: str) -> None:
 
 
 def _find_para_id(comments_path: Path, comment_id: int) -> str | None:
-    dom = defusedxml.minidom.parseString(comments_path.read_text(encoding="utf-8"))
-    for c in dom.getElementsByTagName("w:comment"):
-        if c.getAttribute("w:id") == str(comment_id):
-            for p in c.getElementsByTagName("w:p"):
-                if pid := p.getAttribute("w14:paraId"):
+    dom = parse_dom(read_xml(comments_path))
+    for c in dom.getElementsByTagNameNS(NS["w"], "comment"):
+        if c.getAttributeNS(NS["w"], "id") == str(comment_id):
+            for p in c.getElementsByTagNameNS(NS["w"], "p"):
+                if pid := p.getAttributeNS(NS["w14"], "paraId"):
                     return pid
     return None
 
@@ -122,20 +136,20 @@ def _find_para_id(comments_path: Path, comment_id: int) -> str | None:
 def _next_comment_id(comments_path: Path) -> int:
     if not comments_path.exists():
         return 0
-    dom = defusedxml.minidom.parseString(comments_path.read_text(encoding="utf-8"))
+    dom = parse_dom(read_xml(comments_path))
     ids = []
-    for c in dom.getElementsByTagName("w:comment"):
+    for c in dom.getElementsByTagNameNS(NS["w"], "comment"):
         try:
-            ids.append(int(c.getAttribute("w:id")))
+            ids.append(int(c.getAttributeNS(NS["w"], "id")))
         except ValueError:
             pass
     return (max(ids) + 1) if ids else 0
 
 
 def _get_next_rid(rels_path: Path) -> int:
-    dom = defusedxml.minidom.parseString(rels_path.read_text(encoding="utf-8"))
+    dom = parse_dom(read_xml(rels_path))
     max_rid = 0
-    for rel in dom.getElementsByTagName("Relationship"):
+    for rel in dom.getElementsByTagNameNS(REL_NS, "Relationship"):
         rid = rel.getAttribute("Id")
         if rid and rid.startswith("rId"):
             try:
@@ -146,18 +160,18 @@ def _get_next_rid(rels_path: Path) -> int:
 
 
 def _has_relationship(rels_path: Path, target: str) -> bool:
-    dom = defusedxml.minidom.parseString(rels_path.read_text(encoding="utf-8"))
+    dom = parse_dom(read_xml(rels_path))
     return any(
         rel.getAttribute("Target") == target
-        for rel in dom.getElementsByTagName("Relationship")
+        for rel in dom.getElementsByTagNameNS(REL_NS, "Relationship")
     )
 
 
 def _has_content_type(ct_path: Path, part_name: str) -> bool:
-    dom = defusedxml.minidom.parseString(ct_path.read_text(encoding="utf-8"))
+    dom = parse_dom(read_xml(ct_path))
     return any(
         o.getAttribute("PartName") == part_name
-        for o in dom.getElementsByTagName("Override")
+        for o in dom.getElementsByTagNameNS(CT_NS, "Override")
     )
 
 
@@ -178,12 +192,13 @@ _COMMENT_OVERRIDES = [
 def _ensure_comment_relationships(unpacked_dir: Path) -> None:
     rels_path = unpacked_dir / "word" / "_rels" / "document.xml.rels"
     if not rels_path.exists():
-        return
-    dom = defusedxml.minidom.parseString(rels_path.read_text(encoding="utf-8"))
+        rels_path.parent.mkdir(parents=True, exist_ok=True)
+        rels_path.write_text(f'<Relationships xmlns="{REL_NS}"/>', encoding="utf-8")
+    dom = parse_dom(read_xml(rels_path))
     root = dom.documentElement
     comment_types = {rel_type for rel_type, _ in _COMMENT_RELS}
     existing = set()
-    for rel in dom.getElementsByTagName("Relationship"):
+    for rel in dom.getElementsByTagNameNS(REL_NS, "Relationship"):
         if rel.getAttribute("Type") not in comment_types:
             continue
         part = opc_target(
@@ -198,7 +213,8 @@ def _ensure_comment_relationships(unpacked_dir: Path) -> None:
     for rel_type, target in _COMMENT_RELS:
         if opc_target(target, "word/document.xml") in existing:
             continue
-        rel = dom.createElement("Relationship")
+        tag = (root.prefix + ":" if root.prefix else "") + "Relationship"
+        rel = dom.createElementNS(REL_NS, tag)
         rel.setAttribute("Id", f"rId{next_rid}")
         rel.setAttribute("Type", rel_type)
         rel.setAttribute("Target", target)
@@ -213,17 +229,18 @@ def _ensure_comment_content_types(unpacked_dir: Path) -> None:
     ct_path = unpacked_dir / "[Content_Types].xml"
     if not ct_path.exists():
         return
-    dom = defusedxml.minidom.parseString(ct_path.read_text(encoding="utf-8"))
+    dom = parse_dom(read_xml(ct_path))
     root = dom.documentElement
     existing = {
         o.getAttribute("PartName")
-        for o in dom.getElementsByTagName("Override")
+        for o in dom.getElementsByTagNameNS(CT_NS, "Override")
     }
     changed = False
     for part_name, content_type in _COMMENT_OVERRIDES:
         if part_name in existing:
             continue
-        override = dom.createElement("Override")
+        tag = (root.prefix + ":" if root.prefix else "") + "Override"
+        override = dom.createElementNS(CT_NS, tag)
         override.setAttribute("PartName", part_name)
         override.setAttribute("ContentType", content_type)
         root.appendChild(override)  

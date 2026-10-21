@@ -14,15 +14,60 @@ OOXML_FAMILY = {
 
 _SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.\-]*:")
 
+MAX_PART_BYTES = 32 * 1024 * 1024
+MAX_PACKAGE_BYTES = 128 * 1024 * 1024
+MAX_MEMBERS = 4096
+
+
+def check_archive(zf: zipfile.ZipFile) -> None:
+    """Check names, types and declared sizes before decompressing any members."""
+    entries = zf.infolist()
+    if len(entries) > MAX_MEMBERS:
+        raise ValueError("Archive exceeds the 4096 member limit")
+    seen = set()
+    total = 0
+    for item in entries:
+        name = item.filename
+        path = name.rstrip("/")
+        if (
+            not path or "\\" in path or "\x00" in path or ":" in path
+            or path.startswith("/") or any(p in ("", ".", "..") for p in path.split("/"))
+        ):
+            raise ValueError(f"unsafe archive entry: {name!r}")
+        if path in seen:
+            raise ValueError(f"Duplicate ZIP members: {name!r}")
+        seen.add(path)
+        if stat.S_ISLNK(item.external_attr >> 16):
+            raise ValueError(f"symlink archive entry not allowed: {name!r}")
+        if item.flag_bits & 1:
+            raise ValueError("Encrypted ZIP members are unsupported")
+        if item.compress_type not in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED):
+            raise ValueError("Only stored and deflated ZIP members are supported")
+        total += item.file_size
+        if item.file_size > MAX_PART_BYTES or total > MAX_PACKAGE_BYTES:
+            raise ValueError("Archive exceeds part (32 MiB) or total (128 MiB) size limit")
+
+
+def read_part(zf: zipfile.ZipFile, name: str) -> bytes:
+    info = zf.getinfo(name)
+    if info.file_size > MAX_PART_BYTES:
+        raise ValueError(f"Part exceeds 32 MiB: {name}")
+    with zf.open(info) as stream:
+        data = stream.read(MAX_PART_BYTES + 1)
+    if len(data) > MAX_PART_BYTES:
+        raise ValueError(f"Part exceeds 32 MiB: {name}")
+    return data
+
+
 def opc_target(target: str, source_part: str, target_mode: str = "") -> str | None:
     if not target:
         return None
     if target_mode.lower() == "external":
         return None
-    if _SCHEME_RE.match(target):
-        return None
-
     target = urllib.parse.unquote(target)
+    if _SCHEME_RE.match(target) or target.startswith("//"):
+        raise ValueError("URI relationships must declare TargetMode=External")
+    target = target.split("#", 1)[0]
 
     if "\\" in target:
         raise ValueError(f"relationship target is not a POSIX part name: {target!r}")
@@ -65,6 +110,7 @@ def rendered_text(text: str, preserve: bool) -> str:
 
 
 def safe_extract(zf: zipfile.ZipFile, dest: Path) -> None:
+    check_archive(zf)
     dest = dest.resolve()
     for m in zf.infolist():
         if stat.S_ISLNK(m.external_attr >> 16):

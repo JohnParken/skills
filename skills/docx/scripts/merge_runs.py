@@ -30,7 +30,10 @@ import tempfile
 import zipfile
 from pathlib import Path
 
-import defusedxml.minidom
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from office.xmlio import parse_dom, read_xml
 
 from office.helpers import XML_SPACE, rendered_text, rezip, safe_extract
 
@@ -44,7 +47,7 @@ def merge_runs(input_dir: str) -> tuple[int, str]:
         return 0, f"Error: {doc_xml} not found"
 
     try:
-        dom = defusedxml.minidom.parseString(doc_xml.read_text(encoding="utf-8"))
+        dom = parse_dom(read_xml(doc_xml))
         root = dom.documentElement
         run_names = _run_tag_names(root)
 
