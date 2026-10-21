@@ -1,30 +1,20 @@
-"""Merge adjacent identically-formatted runs in a DOCX.
+"""Merge a conservative subset of adjacent plain WordprocessingML runs.
 
-Word fragments paragraph text across many <w:r> elements (revision ids,
-spell-check markers, editing history), which makes find-and-replace on
-word/document.xml unreliable — the string you're looking for is split
-across runs. This coalesces adjacent runs whose formatting (<w:rPr>) is
-identical, strips rsid attributes and proofErr markers, and consolidates the
-text elements — <w:t>, and <w:delText> for text inside a tracked deletion.
-
-Rendering is unchanged. The text you search is what Word draws, which is not
-always the bytes in the file: an element without xml:space="preserve" has its
-edge whitespace trimmed before it reaches the page, so `<w:t>Hello </w:t>`
-followed by `<w:t>world</w:t>` reads "Helloworld" and merges to exactly that.
-
-Runs in two different <w:ins>/<w:del> wrappers are never merged: that would
-rewrite tracked-change structure, collapsing separate revisions into one.
-
-Only word/document.xml is processed (not headers, footers, or footnotes).
+Only ordinary paragraphs in word/document.xml are processed. Fields, revisions,
+ranges, complex runs and unknown formatting are left unchanged. Supported text
+uses inherited xml:space; no renderer or XSD validation is claimed.
 
 Usage:
-    python merge_runs.py unpacked/                  # after Python unpacking, before editing
-    python merge_runs.py document.docx              # rewrite in place
-    python merge_runs.py document.docx -o out.docx
+    python merge_runs.py unpacked/
+    python merge_runs.py input.docx -o merged.docx
+
+The directory entry point writes document.xml atomically. Packaged input uses
+atomic repacking; signed packages and symbolic links are rejected.
 """
 
-
 import argparse
+import contextlib
+import io
 import sys
 import tempfile
 import zipfile
@@ -33,281 +23,258 @@ from pathlib import Path
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from edit_docx import XML_NS, XMLNS_NS, _eligible, _preserves_space, _serialize_checked, _text
+from edit_structure import _blocked_anchors
+from office.archiveio import open_archive
+from office.helpers import (
+    MAX_MEMBERS, MAX_PACKAGE_BYTES, MAX_PART_BYTES, atomic_write_bytes, rendered_text,
+    reject_signed_package, rezip, safe_extract,
+)
+from office.validators.structure import StructureValidator
 from office.xmlio import parse_dom, read_xml
 
-from office.helpers import XML_SPACE, rendered_text, rezip, safe_extract
-
 WORDML_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
+W14_NS = "http://schemas.microsoft.com/office/word/2010/wordml"
+RSID_ATTRIBUTES = {"rsidR", "rsidRPr", "rsidDel"}
+PROOF_TYPES = {"spellStart", "spellEnd", "gramStart", "gramEnd"}
+PROPERTY_ATTRIBUTES = {name: {"val"} for name in (
+    "rStyle", "b", "bCs", "i", "iCs", "caps", "smallCaps", "strike", "dstrike",
+    "outline", "shadow", "emboss", "imprint", "noProof", "snapToGrid", "vanish",
+    "webHidden", "spacing", "w", "kern", "position", "sz", "szCs", "highlight",
+    "effect", "vertAlign", "rtl", "cs", "em", "specVanish", "oMath",
+)}
+PROPERTY_ATTRIBUTES.update({
+    "rFonts": {"ascii", "hAnsi", "eastAsia", "cs", "hint", "asciiTheme", "hAnsiTheme", "eastAsiaTheme", "cstheme"},
+    "color": {"val", "themeColor", "themeTint", "themeShade"},
+    "u": {"val", "color", "themeColor", "themeTint", "themeShade"},
+    "lang": {"val", "eastAsia", "bidi"},
+})
 
 
-def merge_runs(input_dir: str) -> tuple[int, str]:
-    doc_xml = Path(input_dir) / "word" / "document.xml"
-
-    if not doc_xml.exists():
-        return 0, f"Error: {doc_xml} not found"
-
-    try:
-        dom = parse_dom(read_xml(doc_xml))
-        root = dom.documentElement
-        run_names = _run_tag_names(root)
-
-        _remove_elements(root, "proofErr")
-
-        runs = _find_runs(root, run_names)
-        _strip_rsid_attrs(runs)
-
-        merge_count = 0
-        for container in {run.parentNode for run in runs}:
-            merge_count += _merge_runs_in(container, run_names)
-
-        doc_xml.write_bytes(dom.toxml(encoding="UTF-8"))
-        return merge_count, f"Merged {merge_count} runs"
-
-    except Exception as e:
-        return 0, f"Error: {e}"
+def _elements(node, name=None):
+    return [child for child in node.childNodes if child.nodeType == child.ELEMENT_NODE
+            and (name is None or (child.namespaceURI == WORDML_NS and child.localName == name))]
 
 
+def _attributes_allowed(node, allowed):
+    return all(attr.namespaceURI == XMLNS_NS or (attr.namespaceURI, attr.localName) in allowed
+               for attr in node.attributes.values())
 
 
-def _is_element(node, tag: str) -> bool:
-    name = node.localName or node.tagName
-    return name == tag or name.endswith(f":{tag}")
-
-
-def _run_tag_names(root) -> set[str]:
-    names = set()
-    for attr in root.attributes.values():
-        if attr.value == WORDML_NS:
-            if attr.name == "xmlns":
-                names.add("r")
-            elif attr.name.startswith("xmlns:"):
-                names.add(attr.name.split(":", 1)[1] + ":r")
-    return names or {"w:r", "r"}
-
-
-def _find_elements(root, tag: str) -> list:
-    results = []
-
-    def traverse(node):
-        if node.nodeType == node.ELEMENT_NODE:
-            if _is_element(node, tag):
-                results.append(node)
-            for child in node.childNodes:
-                traverse(child)
-
-    traverse(root)
-    return results
-
-
-def _find_runs(root, run_names: set[str]) -> list:
-    return [e for e in _find_elements(root, "r") if _is_run(e, run_names)]
-
-
-def _get_child(parent, tag: str):
-    return next(iter(_get_children(parent, tag)), None)
-
-
-def _get_children(parent, tag: str) -> list:
-    return [
-        child
-        for child in parent.childNodes
-        if child.nodeType == child.ELEMENT_NODE and _is_element(child, tag)
-    ]
-
-
-def _is_adjacent(elem1, elem2) -> bool:
-    node = elem1.nextSibling
-    while node:
-        if node == elem2:
-            return True
-        if node.nodeType == node.ELEMENT_NODE:
-            return False
-        if node.nodeType == node.TEXT_NODE and node.data.strip(XML_SPACE):
-            return False
-        node = node.nextSibling
-    return False
-
-
-
-
-def _remove_elements(root, tag: str):
-    for elem in _find_elements(root, tag):
-        if elem.parentNode:
-            elem.parentNode.removeChild(elem)
-
-
-def _strip_rsid_attrs(runs: list):
-    for run in runs:
-        for attr in list(run.attributes.values()):
-            if "rsid" in attr.name.lower():
-                run.removeAttribute(attr.name)
-
-
-
-
-def _merge_runs_in(container, run_names: set[str]) -> int:
-    merge_count = 0
-    run = _first_child_run(container, run_names)
-
-    while run:
-        while True:
-            next_elem = _next_element_sibling(run)
-            if next_elem and _is_run(next_elem, run_names) and _can_merge(run, next_elem):
-                _merge_run_content(run, next_elem)
-                container.removeChild(next_elem)
-                merge_count += 1
-            else:
-                break
-
-        _consolidate_text(run)
-        run = _next_sibling_run(run, run_names)
-
-    return merge_count
-
-
-def _first_child_run(container, run_names: set[str]):
-    for child in container.childNodes:
-        if child.nodeType == child.ELEMENT_NODE and _is_run(child, run_names):
-            return child
-    return None
-
-
-def _next_element_sibling(node):
-    sibling = node.nextSibling
-    while sibling:
-        if sibling.nodeType == sibling.ELEMENT_NODE:
-            return sibling
-        sibling = sibling.nextSibling
-    return None
-
-
-def _next_sibling_run(node, run_names: set[str]):
-    sibling = node.nextSibling
-    while sibling:
-        if sibling.nodeType == sibling.ELEMENT_NODE:
-            if _is_run(sibling, run_names):
-                return sibling
-        sibling = sibling.nextSibling
-    return None
-
-
-def _is_run(node, run_names: set[str]) -> bool:
-    return node.tagName in run_names
-
-
-def _can_merge(run1, run2) -> bool:
-    rpr1 = _get_child(run1, "rPr")
-    rpr2 = _get_child(run2, "rPr")
-
-    if (rpr1 is None) != (rpr2 is None):
-        return False
-    if rpr1 is None:
-        return True
-    return rpr1.toxml() == rpr2.toxml()  
-
-
-def _merge_run_content(target, source):
-    for child in list(source.childNodes):
+def _children_allowed(node, allowed):
+    for child in node.childNodes:
         if child.nodeType == child.ELEMENT_NODE:
-            name = child.localName or child.tagName
-            if name != "rPr" and not name.endswith(":rPr"):
-                target.appendChild(child)
+            if (child.namespaceURI, child.localName) not in allowed:
+                return False
+        elif child.nodeType != child.TEXT_NODE or child.data.strip(" \t\r\n"):
+            return False
+    return True
 
 
-def _element_text(elem) -> str:
-    return "".join(
-        child.data
-        for child in elem.childNodes
-        if child.nodeType in (child.TEXT_NODE, child.CDATA_SECTION_NODE)
-    )
+def _plain_properties(properties):
+    if not _attributes_allowed(properties, set()):
+        return False
+    if not _children_allowed(properties, {(WORDML_NS, name) for name in PROPERTY_ATTRIBUTES}):
+        return False
+    names = [child.localName for child in _elements(properties)]
+    if len(names) != len(set(names)):
+        return False
+    for child in _elements(properties):
+        if not _attributes_allowed(child, {(WORDML_NS, name) for name in PROPERTY_ATTRIBUTES[child.localName]}):
+            return False
+        if not _children_allowed(child, set()):
+            return False
+    return True
 
 
-def _has_preserve(elem) -> bool:
-    return elem.getAttribute("xml:space") == "preserve"
+def _plain_run(run, blocked):
+    allowed = {(WORDML_NS, name) for name in RSID_ATTRIBUTES} | {(XML_NS, "space")}
+    if not _attributes_allowed(run, allowed):
+        return False
+    if not _children_allowed(run, {(WORDML_NS, "rPr"), (WORDML_NS, "t")}):
+        return False
+    properties = _elements(run, "rPr")
+    if len(properties) > 1 or (properties and not _plain_properties(properties[0])):
+        return False
+    texts = _elements(run, "t")
+    if not texts:
+        return False
+    for text in texts:
+        if text in blocked or not _eligible(text):
+            return False
+        _preserves_space(text)  # Reject invalid xml:space rather than guess.
+    return True
 
 
-def _rendered_text(elem) -> str:
-    return rendered_text(_element_text(elem), _has_preserve(elem))
+def _proof_error(node):
+    return (node.namespaceURI == WORDML_NS and node.localName == "proofErr"
+            and _attributes_allowed(node, {(WORDML_NS, "type")})
+            and node.getAttributeNS(WORDML_NS, "type") in PROOF_TYPES
+            and _children_allowed(node, set()))
 
 
-def _consolidate_text(run):
-    for tag in ("t", "delText"):
-        _consolidate_text_elements(run, tag)
+def _paragraph_runs(paragraph, blocked):
+    paragraph_attrs = {(WORDML_NS, name) for name in (
+        "rsidR", "rsidRPr", "rsidDel", "rsidP", "rsidRDefault",
+    )} | {(XML_NS, "space"), (W14_NS, "paraId"), (W14_NS, "textId")}
+    if not _attributes_allowed(paragraph, paragraph_attrs):
+        return []
+    if not _children_allowed(paragraph, {(WORDML_NS, name) for name in ("pPr", "r", "proofErr")}):
+        return []
+    if len(_elements(paragraph, "pPr")) > 1:
+        return []
+    for properties in _elements(paragraph, "pPr"):
+        for node in [properties, *properties.getElementsByTagName("*")]:
+            if node.namespaceURI != WORDML_NS or any(
+                attr.namespaceURI not in {WORDML_NS, XMLNS_NS, XML_NS}
+                for attr in node.attributes.values()
+            ):
+                return []
+    for name in ("pPrChange", "rPrChange", "sectPr"):
+        if paragraph.getElementsByTagNameNS(WORDML_NS, name):
+            return []
+    if any(not _proof_error(node) for node in _elements(paragraph, "proofErr")):
+        return []
+    runs = _elements(paragraph, "r")
+    return runs if runs and all(_plain_run(run, blocked) for run in runs) else []
 
 
-def _consolidate_text_elements(run, tag: str):
-    t_elements = _get_children(run, tag)
-
-    for i in range(len(t_elements) - 1, 0, -1):
-        curr, prev = t_elements[i], t_elements[i - 1]
-
-        if _is_adjacent(prev, curr):
-            merged = _rendered_text(prev) + _rendered_text(curr)
-            had_preserve = _has_preserve(prev) or _has_preserve(curr)
-
-            new_text = run.ownerDocument.createTextNode(merged)
-            for node in list(prev.childNodes):
-                if node.nodeType in (node.TEXT_NODE, node.CDATA_SECTION_NODE):
-                    prev.removeChild(node)
-                else:
-                    run.insertBefore(node, curr)
-            prev.appendChild(new_text)
-            for node in list(curr.childNodes):
-                if node.nodeType not in (node.TEXT_NODE, node.CDATA_SECTION_NODE):
-                    run.insertBefore(node, curr)
-
-            if merged != merged.strip(XML_SPACE) or had_preserve:
-                prev.setAttribute("xml:space", "preserve")
-            elif prev.hasAttribute("xml:space"):
-                prev.removeAttribute("xml:space")
-
-            run.removeChild(curr)
+def _format_key(run):
+    properties = _elements(run, "rPr")
+    return properties[0].toxml() if properties else None
 
 
+def _combine(group):
+    texts = [text for run in group for text in _elements(run, "t")]
+    value = "".join(rendered_text(_text(text), _preserves_space(text)) for text in texts)
+    target, first = group[0], texts[0]
+    for child in list(first.childNodes):
+        first.removeChild(child)
+    if value:
+        first.appendChild(first.ownerDocument.createTextNode(value))
+    first.setAttributeNS(XML_NS, "xml:space", "preserve")
+    for text in list(_elements(target, "t"))[1:]:
+        target.removeChild(text)
+    for run in group[1:]:
+        run.parentNode.removeChild(run)
+    if len(group) > 1:
+        for name in RSID_ATTRIBUTES:
+            if target.hasAttributeNS(WORDML_NS, name):
+                target.removeAttributeNS(WORDML_NS, name)
 
 
-def _merge_or_die(path: Path) -> str:
-    _, msg = merge_runs(str(path))
-    if msg.startswith("Error"):
-        print(msg, file=sys.stderr)
-        sys.exit(1)
-    return msg
+def _check_directory(directory, extension):
+    if not directory.is_dir() or directory.is_symlink():
+        raise ValueError("Input must be an unpacked directory without symbolic links")
+    paths = []
+    total = 0
+    for path in directory.rglob("*"):
+        if path.is_symlink():
+            raise ValueError("Symbolic links in unpacked packages are unsupported")
+        paths.append(path)
+        if len(paths) > MAX_MEMBERS:
+            raise ValueError("Unpacked package exceeds the member limit")
+        if path.is_file():
+            size = path.stat().st_size
+            total += size
+            if size > MAX_PART_BYTES or total > MAX_PACKAGE_BYTES:
+                raise ValueError("Unpacked package exceeds the size limit")
+    files = {path.relative_to(directory).as_posix() for path in paths if path.is_file()}
+    relation_types = []
+    for path in paths:
+        if path.is_file() and path.name.lower().endswith(".rels"):
+            dom = parse_dom(read_xml(path))
+            relation_types.extend(node.getAttribute("Type")
+                                  for node in dom.getElementsByTagNameNS(REL_NS, "Relationship"))
+    reject_signed_package(files, relation_types)
+    validator = StructureValidator(directory, extension=extension)
+    with contextlib.redirect_stdout(io.StringIO()):
+        valid = validator.validate()
+    if not valid:
+        raise ValueError("Input failed basic structure checks: " + "; ".join(validator.errors[:5]))
 
 
-def main() -> None:
-    p = argparse.ArgumentParser(
-        description="Merge adjacent identically-formatted runs in a DOCX (directory or .docx file)."
-    )
-    p.add_argument("input", help="Unpacked DOCX directory OR a .docx/.dotx file")
-    p.add_argument(
-        "-o", "--output",
-        help="Output .docx path (only valid when input is a .docx; default: overwrite input)",
-    )
-    args = p.parse_args()
-
-    src = Path(args.input)
-
+def merge_runs(input_dir: str, *, extension=None) -> tuple[int, str]:
+    """Merge supported runs; return controlled errors without modifying the input."""
     try:
-        if src.is_dir():
-            if args.output:
-                p.error("--output is only valid for .docx input; directory input is modified in place")
-            print(_merge_or_die(src))
-        elif src.is_file() and src.suffix.lower() in (".docx", ".dotx"):
-            out = Path(args.output) if args.output else src
-            with tempfile.TemporaryDirectory() as tmp:
-                tmp_path = Path(tmp)
-                with zipfile.ZipFile(src) as zf:
-                    safe_extract(zf, tmp_path)
-                msg = _merge_or_die(tmp_path)
-                rezip(tmp_path, out)
-            print(f"{msg}; wrote {out}")
+        directory = Path(input_dir)
+        if extension not in (None, ".docx", ".dotx"):
+            raise ValueError("Unsupported document extension")
+        _check_directory(directory, extension)
+        document = directory / "word/document.xml"
+        original = read_xml(document)
+        dom = parse_dom(original)
+        blocked = _blocked_anchors(dom)
+        merged = 0
+        changed = False
+        for paragraph in dom.getElementsByTagNameNS(WORDML_NS, "p"):
+            runs = _paragraph_runs(paragraph, blocked)
+            if not runs:
+                continue
+            for marker in _elements(paragraph, "proofErr"):
+                paragraph.removeChild(marker)
+                changed = True
+            index = 0
+            while index < len(runs):
+                end = index + 1
+                while end < len(runs) and _format_key(runs[index]) == _format_key(runs[end]):
+                    end += 1
+                group = runs[index:end]
+                if len(group) > 1 or len(_elements(group[0], "t")) > 1:
+                    _combine(group)
+                    merged += len(group) - 1
+                    changed = True
+                index = end
+        if changed:
+            atomic_write_bytes(document, _serialize_checked(dom))
+        return merged, f"Merged {merged} runs"
+    except (OSError, ValueError, RuntimeError, zipfile.BadZipFile) as exc:
+        return 0, f"Error: {exc}"
+
+
+def _merge_or_die(path, *, extension=None):
+    _, message = merge_runs(str(path), extension=extension)
+    if message.startswith("Error"):
+        raise ValueError(message)
+    return message
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("input", type=Path, help="Unpacked directory or DOCX/DOTX file")
+    parser.add_argument("-o", "--output", type=Path,
+                        help="Output document; packaged input defaults to an atomic in-place rewrite")
+    args = parser.parse_args(argv)
+    source = args.input
+    try:
+        if source.is_symlink():
+            raise ValueError("Symbolic link inputs are unsupported")
+        if source.is_dir():
+            if args.output is not None:
+                raise ValueError("Directory input is modified in place and takes no --output")
+            print(_merge_or_die(source))
+        elif source.is_file() and source.suffix.lower() in {".docx", ".dotx"}:
+            output = args.output if args.output is not None else source
+            if output.suffix.lower() != source.suffix.lower():
+                raise ValueError("Input and output must have the same DOCX/DOTX extension")
+            if output.is_symlink():
+                raise ValueError("Symbolic link outputs are unsupported")
+            with tempfile.TemporaryDirectory(prefix="docx-merge-") as temporary:
+                directory = Path(temporary)
+                with open_archive(source) as package:
+                    safe_extract(package, directory)
+                message = _merge_or_die(directory, extension=source.suffix.lower())
+                output.parent.mkdir(parents=True, exist_ok=True)
+                rezip(directory, output)
+            print(f"{message}; wrote {output}")
         else:
-            print(f"Error: {src} is neither a directory nor a .docx/.dotx file", file=sys.stderr)
-            sys.exit(1)
-    except (OSError, ValueError, zipfile.BadZipFile) as e:
-        print(f"Error: {e}", file=sys.stderr)
-        sys.exit(1)
+            raise ValueError("Input must be an unpacked directory or DOCX/DOTX file")
+    except (OSError, ValueError, RuntimeError, zipfile.BadZipFile) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

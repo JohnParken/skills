@@ -10,9 +10,11 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 try:
+    from .archiveio import open_archive
     from .helpers import OOXML_FAMILY, safe_extract
     from .validators import StructureValidator, RedliningValidator
 except ImportError:
+    from archiveio import open_archive
     from helpers import OOXML_FAMILY, safe_extract
     from validators import StructureValidator, RedliningValidator
 
@@ -43,7 +45,7 @@ def main(argv=None):
             if args.path.is_file():
                 extension = args.path.suffix.lower()
                 unpacked = Path(tmp)
-                with zipfile.ZipFile(args.path) as archive:
+                with open_archive(args.path) as archive:
                     safe_extract(archive, unpacked)
             validator = StructureValidator(
                 unpacked, extension=extension,

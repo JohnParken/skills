@@ -1,6 +1,8 @@
 """Add comments to a DOCX document.
 
 Accepts either an unpacked directory OR a .docx/.dotx file directly.
+Directory edits are staged and published using a recoverable two-rename swap,
+not one atomic multi-file operation; use a stable trusted task directory.
 
 Usage:
     # Against an unpacked directory (writes satellite files in place)
@@ -23,8 +25,10 @@ After running, add markers to word/document.xml so the comment is visible:
 """
 
 import argparse
+import os
 import random
 import shutil
+import stat
 import sys
 import tempfile
 import zipfile
@@ -35,11 +39,15 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from office.xmlio import parse_dom, read_xml
+from office.archiveio import open_archive
 from edit_docx import XMLNS_NS, _serialize_checked
 from xml.parsers.expat import ExpatError
 from xml.sax.saxutils import escape as xml_escape
 
-from office.helpers import opc_target, reject_signed_package, rezip as _rezip, safe_extract as _safe_extract
+from office.helpers import (
+    MAX_MEMBERS, MAX_PACKAGE_BYTES, MAX_PART_BYTES, opc_target, reject_signed_package,
+    rezip as _rezip, safe_extract as _safe_extract,
+)
 
 TEMPLATE_DIR = Path(__file__).resolve().parents[1] / "assets" / "comments"
 NS = {
@@ -249,9 +257,23 @@ def _unique_hex_id(used):
 def _preflight(unpacked_dir, text, author, initials, comment_id, parent_id, raw):
     if unpacked_dir.is_symlink() or not unpacked_dir.is_dir():
         raise ValueError("Input must be a directory without symbolic links")
-    if any(path.is_symlink() for path in unpacked_dir.rglob("*")):
-        raise ValueError("Symbolic links in the package are unsupported")
-    files = [path for path in unpacked_dir.rglob("*") if path.is_file()]
+    files = []
+    total = count = 0
+    for path in unpacked_dir.rglob("*"):
+        mode = path.lstat().st_mode
+        count += 1
+        if stat.S_ISLNK(mode):
+            raise ValueError("Symbolic links in the package are unsupported")
+        if not (stat.S_ISREG(mode) or stat.S_ISDIR(mode)):
+            raise ValueError("Only regular package files and directories are supported")
+        if count > MAX_MEMBERS:
+            raise ValueError("Package exceeds the directory entry limit")
+        if stat.S_ISREG(mode):
+            size = path.stat().st_size
+            total += size
+            if size > MAX_PART_BYTES or total > MAX_PACKAGE_BYTES:
+                raise ValueError("Package exceeds size limits")
+            files.append(path)
     relationship_types = []
     for path in files:
         if path.name.lower().endswith(".rels"):
@@ -310,7 +332,7 @@ def _preflight(unpacked_dir, text, author, initials, comment_id, parent_id, raw)
     return para_ids, durable_ids
 
 
-def add_comment(
+def _add_comment_inplace(
     unpacked_dir: Path | str,
     text: str,
     comment_id: int | None = None,
@@ -397,6 +419,77 @@ def add_comment(
     return comment_id, para_id, f"Added {action} id={comment_id} (paraId={para_id})"
 
 
+def add_comment(
+    unpacked_dir: Path | str,
+    text: str,
+    comment_id: int | None = None,
+    author: str = "Claude",
+    initials: str = "C",
+    parent_id: int | None = None,
+    raw: bool = False,
+) -> tuple[int, str, str]:
+    """Stage all parts before publishing a recoverable directory replacement.
+
+    This is two directory renames, not a single atomic multi-file transaction.
+    Catchable install failures restore the backup; an interrupted process or a
+    failed restoration may leave the original under the reported backup path.
+    Use a trusted, stable task directory without concurrent writers/readers.
+    """
+    source = Path(unpacked_dir)
+    _preflight(source, text, author, initials, comment_id, parent_id, raw)
+    source = source.resolve()
+    if Path.cwd().resolve().is_relative_to(source):
+        raise ValueError("Comment input must not contain the current working directory; use a separate unpacked directory")
+    transaction = Path(tempfile.mkdtemp(prefix=f".{source.name}.comment-", dir=source.parent))
+    planned, backup = transaction / "planned", transaction / "backup"
+    installed = keep_transaction = False
+    retained = None
+    try:
+        shutil.copytree(source, planned)
+        result = _add_comment_inplace(planned, text, comment_id, author, initials, parent_id, raw)
+        _preflight(planned, text, author, initials, comment_id, parent_id, raw)
+        try:
+            os.replace(source, backup)
+            os.replace(planned, source)
+            installed = True
+        except BaseException as exc:
+            if backup.exists():
+                if source.exists():
+                    raise RuntimeError(f"Comment install outcome requires inspection; original backup retained at {backup}") from exc
+                try:
+                    os.replace(backup, source)
+                except BaseException as restore_error:
+                    if backup.exists():
+                        raise RuntimeError(f"Comment rollback failed; restore the original directory from {backup}") from restore_error
+                    if source.is_dir():
+                        # The restore completed before the late error. Do not
+                        # invent a missing recovery path or hide the install failure.
+                        raise exc from restore_error
+                    keep_transaction = True
+                    raise RuntimeError(f"Comment rollback outcome requires inspection at {source} and {transaction}") from restore_error
+            raise
+        try:
+            shutil.rmtree(backup)
+        except OSError:
+            if backup.exists():
+                retained = backup
+    finally:
+        # Never automatically delete the original after an uncertain outcome or
+        # failed rollback. Its location is included in the error/result above.
+        if not keep_transaction and not backup.exists():
+            try:
+                shutil.rmtree(transaction)
+            except OSError:
+                if transaction.exists():
+                    retained = transaction
+                    if not installed:
+                        print(f"Warning: comment cleanup retained at {transaction}", file=sys.stderr)
+    if retained is not None:
+        kind = "backup " if retained == backup else ""
+        return result[0], result[1], result[2] + f"; installed, cleanup {kind}retained at {retained}"
+    return result
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description="Add a comment to a DOCX (directory or .docx file).")
     p.add_argument("input", help="Unpacked DOCX directory OR a .docx/.dotx file")
@@ -426,9 +519,11 @@ def main() -> None:
             print(msg)
         elif src.is_file() and src.suffix.lower() in (".docx", ".dotx"):
             out = Path(args.output) if args.output else src
+            if out.is_symlink() or out.suffix.lower() != src.suffix.lower():
+                raise ValueError("Comment output must have the same DOCX/DOTX extension and not be a symbolic link")
             with tempfile.TemporaryDirectory() as tmp:
                 tmp_path = Path(tmp)
-                with zipfile.ZipFile(src) as zf:
+                with open_archive(src) as zf:
                     _safe_extract(zf, tmp_path)
                 cid, _, msg = add_comment(
                     tmp_path, args.text, comment_id=args.comment_id,
@@ -441,7 +536,7 @@ def main() -> None:
         else:
             print(f"Error: {src} is neither a directory nor a .docx/.dotx file", file=sys.stderr)
             sys.exit(1)
-    except (FileNotFoundError, ValueError, zipfile.BadZipFile, ExpatError) as e:
+    except (OSError, ValueError, RuntimeError, zipfile.BadZipFile, ExpatError) as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
 

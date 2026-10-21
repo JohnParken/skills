@@ -17,9 +17,11 @@ import zipfile
 from pathlib import Path
 
 try:
+    from ..archiveio import open_archive
     from .. import xmlio as ET
     from ..helpers import rendered_text, safe_extract
 except ImportError:
+    from archiveio import open_archive
     import xmlio as ET
     from helpers import rendered_text, safe_extract
 
@@ -47,7 +49,7 @@ class RedliningValidator:
             temp_path = Path(temp_dir)
 
             try:
-                with zipfile.ZipFile(self.original_docx, "r") as zip_ref:
+                with open_archive(self.original_docx) as zip_ref:
                     safe_extract(zip_ref, temp_path)
             except Exception as e:
                 print(f"FAILED - Error unpacking original docx: {e}")

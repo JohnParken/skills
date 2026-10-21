@@ -14,7 +14,8 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from office import xmlio as SafeET
-from office.helpers import check_archive, read_part
+from office.archiveio import open_archive
+from office.helpers import atomic_write_bytes, check_archive, read_part
 
 W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 _REVISION_TAGS = {
@@ -126,11 +127,12 @@ def read_docx(path: str | Path, *, revisions: str = "accepted", include_related:
     """Return document text in reading order; this does not accept revisions or reproduce layout."""
     if revisions not in _REVISION_TAGS:
         raise ValueError("revisions must be 'accepted', 'original', or 'all'")
+    xml_budget = SafeET.XmlBudget()
     try:
-        with zipfile.ZipFile(path) as package:
+        with open_archive(path) as package:
             check_archive(package)
             try:
-                document = SafeET.fromstring(read_part(package, "word/document.xml"))
+                document = SafeET.fromstring(read_part(package, "word/document.xml"), budget=xml_budget)
             except KeyError as exc:
                 raise ValueError("DOCX package is missing word/document.xml") from exc
             if document.tag != _tag("document"):
@@ -150,12 +152,12 @@ def read_docx(path: str | Path, *, revisions: str = "accepted", include_related:
                 )
                 for label, prefix in categories:
                     for part in sorted(n for n in names if n.startswith(prefix) and n.endswith(".xml")):
-                        root = SafeET.fromstring(read_part(package, part))
+                        root = SafeET.fromstring(read_part(package, part), budget=xml_budget)
                         text = _part_text(root, part, revisions)
                         if text.strip():
                             pieces.extend((f"[{label}: {part}]", text))
     except SafeET.ParseError as exc:
-        raise ValueError(f"invalid or unsafe XML in DOCX package: {exc}") from exc
+        raise ValueError(f"cannot read DOCX package: invalid or unsafe XML/archive input: {exc}") from exc
     except (zipfile.BadZipFile, OSError) as exc:
         raise ValueError(f"cannot read DOCX package: {exc}") from exc
     return "\n".join(pieces)
@@ -252,13 +254,14 @@ def read_docx_structure(path: str | Path, *, revisions: str = "accepted",
         "parts": [], "definitions": {},
     }
     budget = [0]
+    xml_budget = SafeET.XmlBudget()
     try:
-        with zipfile.ZipFile(path) as package:
+        with open_archive(path) as package:
             check_archive(package)
             names = set(package.namelist())
 
             def read_root(part, expected):
-                dom = SafeET.parse_dom(read_part(package, part))
+                dom = SafeET.parse_dom(read_part(package, part), budget=xml_budget)
                 root = dom.documentElement
                 if root.namespaceURI != W or root.localName != expected:
                     raise ValueError(f"{part} does not contain a w:{expected} root")
@@ -280,7 +283,7 @@ def read_docx_structure(path: str | Path, *, revisions: str = "accepted",
                         result["parts"].append({"name": part, "category": category,
                                                "root": _structured_node(read_root(part, expected), revisions, budget)})
     except SafeET.ParseError as exc:
-        raise ValueError(f"invalid or unsafe XML in DOCX package: {exc}") from exc
+        raise ValueError(f"cannot read DOCX package: invalid or unsafe XML/archive input: {exc}") from exc
     except (zipfile.BadZipFile, OSError) as exc:
         raise ValueError(f"cannot read DOCX package: {exc}") from exc
     return result
@@ -310,7 +313,7 @@ def main(argv: list[str] | None = None) -> int:
         else:
             text = read_docx(args.input, revisions=args.revisions, include_related=args.include_related)
         if args.output:
-            args.output.write_text(text, encoding="utf-8")
+            atomic_write_bytes(args.output, text.encode("utf-8"))
         else:
             sys.stdout.write(text)
     except (ValueError, OSError, zipfile.BadZipFile) as exc:

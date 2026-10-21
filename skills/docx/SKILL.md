@@ -259,6 +259,8 @@ python -I -S -B docx/scripts/read_docx.py ./output.docx --include-related -o ./c
 
 ## 维护资源
 
+处理不可信输入或维护安全逻辑时，按 [安全边界与验收](references/security.md) 核对威胁模型、资源门禁、归档兼容范围及写入保护。不要将结构检查当作主动内容清洗或阅读器安全认证。
+
 保留 `assets/comments/` 中的 `comments.xml`、`commentsExtended.xml`、`commentsIds.xml` 和 `commentsExtensible.xml`。使用相对资源路径；禁止硬编码开发者目录或把 XML 命名空间 URI 当成需要访问的网络资源。
 
 禁止在 skill 中留下临时文档、日志、缓存、测试产物、README 或多版本脚本。仅将确需复用的模板和参考材料分别整理到 assets/ 和 references/；不要把临时产物改放这些目录充当资源。维护时使用标准库 unittest 在第三方包不可见且可执行程序搜索路径为空的环境中验证；将测试产物放在独立临时目录。

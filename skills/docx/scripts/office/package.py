@@ -17,8 +17,10 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 try:
+    from .archiveio import open_archive
     from .helpers import check_archive, rezip, safe_extract
 except ImportError:
+    from archiveio import open_archive
     from helpers import check_archive, rezip, safe_extract
 
 
@@ -49,11 +51,10 @@ def unpack_document(source: str | Path, destination: str | Path) -> Path:
     with tempfile.TemporaryDirectory(prefix="docx-unpack-", dir=destination.parent) as tmp:
         staging = Path(tmp) / "package"
         staging.mkdir()
-        with zipfile.ZipFile(source) as archive:
+        with open_archive(source) as archive:
             check_archive(archive)
-            bad_member = archive.testzip()
-            if bad_member:
-                raise ValueError(f"Corrupt ZIP member: {bad_member}")
+            # Bounded extraction reads every member to its declared end and
+            # checks CRC without testzip's larger decompression read budget.
             safe_extract(archive, staging)
         _check_parts(staging)
         if destination.exists():

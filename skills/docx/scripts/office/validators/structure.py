@@ -72,6 +72,7 @@ class StructureValidator:
         if not self.directory.is_dir() or self.directory.is_symlink():
             raise ValueError("Input must be a directory without symbolic links")
         total = count = 0
+        xml_budget = xmlio.XmlBudget()
         for path in self.directory.rglob("*"):
             if path.is_symlink():
                 raise ValueError(f"Symbolic link in package: {path.name}")
@@ -86,7 +87,7 @@ class StructureValidator:
             self.files.add(name)
             if name.lower().endswith((".xml", ".rels")):
                 try:
-                    self.roots[name] = xmlio.parse(path).getroot()
+                    self.roots[name] = xmlio.parse(path, budget=xml_budget).getroot()
                 except ValueError as exc:
                     self.error(f"{name}: {exc}")
         for name in REQUIRED:
@@ -172,8 +173,13 @@ class StructureValidator:
             ids = self.relations.get(name, {})
             for node in root.iter():
                 for attr, value in node.attrib.items():
-                    if attr in (f"{{{R}}}id", f"{{{R}}}embed", f"{{{R}}}link") and value not in ids:
-                        self.error(f"Unresolved relationship reference {value} in {name}")
+                    if attr in (f"{{{R}}}id", f"{{{R}}}embed", f"{{{R}}}link"):
+                        if value not in ids:
+                            self.error(f"Unresolved relationship reference {value} in {name}")
+                        elif attr == f"{{{R}}}embed" and ids[value][1] is None:
+                            # Embedded data must be a package part. Explicit
+                            # r:link and external hyperlinks remain supported.
+                            self.error(f"Embedded relationship {value} must be internal in {name}")
 
     def _word(self):
         root = self.roots["word/document.xml"]
