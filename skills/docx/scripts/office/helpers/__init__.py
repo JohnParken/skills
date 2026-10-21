@@ -19,6 +19,14 @@ MAX_PACKAGE_BYTES = 128 * 1024 * 1024
 MAX_MEMBERS = 4096
 
 
+def reject_signed_package(files, relation_types=()):
+    """Refuse mutations that would leave a package's signatures invalid."""
+    if any(str(name).lower().startswith("_xmlsignatures/") for name in files) or any(
+        "digital-signature" in kind.lower() for kind in relation_types
+    ):
+        raise ValueError("Signed packages are unsupported for editing")
+
+
 def check_archive(zf: zipfile.ZipFile) -> None:
     """Check names, types and declared sizes before decompressing any members."""
     entries = zf.infolist()

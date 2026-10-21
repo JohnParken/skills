@@ -85,6 +85,10 @@ class StdlibCoreTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 xmlio.fromstring(payload)
 
+    def test_dom_reports_namespace_parse_failures_as_controlled_value_errors(self):
+        with self.assertRaisesRegex(ValueError, "Invalid XML"):
+            xmlio.parse_dom(b'<w:document/>')
+
     def test_archive_preflight_rejects_unsafe_duplicate_and_oversize_entries(self):
         for name, kwargs in (("../escape", {}), ("duplicate", {"duplicate": ("custom.bin", b"x")}),
                              ("oversize", {"large": True})):
@@ -144,6 +148,87 @@ class StdlibCoreTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 replace_text(source, output, specification, require_no_placeholders=no_placeholders)
             self.assertFalse(output.exists())
+
+    def test_rejects_text_inside_cross_paragraph_fields_and_comment_ranges(self):
+        cases = {
+            "field": ('<w:p><w:r><w:fldChar w:fldCharType="begin"/>'
+                      '<w:instrText> TOC </w:instrText><w:fldChar w:fldCharType="separate"/></w:r></w:p>'
+                      '<w:p><w:r><w:t>待替换</w:t></w:r></w:p>'
+                      '<w:p><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>'),
+            "comment": ('<w:p><w:commentRangeStart w:id="0"/></w:p>'
+                        '<w:p><w:r><w:t>待替换</w:t></w:r></w:p>'
+                        '<w:p><w:commentRangeEnd w:id="0"/>'
+                        '<w:r><w:commentReference w:id="0"/></w:r></w:p>'),
+        }
+        extra = {
+            "word/comments.xml": f'<w:comments xmlns:w="{W}"><w:comment w:id="0" w:author="Reviewer"/></w:comments>',
+            "word/_rels/document.xml.rels": f'<Relationships xmlns="{REL}"><Relationship Id="c" Type="{R}/comments" Target="comments.xml"/></Relationships>',
+        }
+        for kind, body in cases.items():
+            for extension in ("docx", "dotx"):
+                with self.subTest(kind=kind, extension=extension):
+                    source = self.root / f"range-{kind}.{extension}"
+                    output = self.root / f"range-{kind}-out.{extension}"
+                    content_type = None if extension == "docx" else "application/vnd.openxmlformats-officedocument.wordprocessingml.template.main+xml"
+                    document = f'<w:document xmlns:w="{W}"><w:body>{body}</w:body></w:document>'
+                    write_package(source, package_parts(document, extra if kind == "comment" else None, content_type))
+                    before = source.read_bytes()
+                    output.write_bytes(b"existing output")
+                    with self.assertRaisesRegex(ValueError, "unsupported"):
+                        replace_text(source, output, {"replacements": [{"old": "待替换", "new": "已修改"}]})
+                    self.assertEqual(source.read_bytes(), before)
+                    self.assertEqual(output.read_bytes(), b"existing output")
+
+    def test_nested_fields_end_before_supported_plain_text(self):
+        body = ('<w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r></w:p>'
+                '<w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r></w:p>'
+                '<w:p><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>'
+                '<w:p><w:r><w:t>保留字段结果</w:t></w:r></w:p>'
+                '<w:p><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>'
+                '<w:p><w:r><w:t>普通文字</w:t></w:r></w:p>')
+        document = f'<w:document xmlns:w="{W}"><w:body>{body}</w:body></w:document>'
+        source, output = self.root / "nested.docx", self.root / "nested-out.docx"
+        write_package(source, package_parts(document))
+        replace_text(source, output, {"replacements": [{"old": "普通文字", "new": "中文 & English"}]})
+        with zipfile.ZipFile(output) as package:
+            tree = xmlio.fromstring(package.read("word/document.xml"))
+            self.assertEqual([node.text for node in tree.iter(f"{{{W}}}t")],
+                             ["保留字段结果", "中文 & English"])
+
+    def test_unbalanced_fields_fail_closed_without_replacing_output(self):
+        for marker in ('<w:fldChar w:fldCharType="begin"/>',
+                       '<w:fldChar w:fldCharType="end"/>',
+                       '<w:fldChar w:fldCharType="separate"/>',
+                       '<w:fldChar/>'):
+            with self.subTest(marker=marker):
+                document = (f'<w:document xmlns:w="{W}"><w:body><w:p><w:r>{marker}</w:r></w:p>'
+                            '<w:p><w:r><w:t>普通文字</w:t></w:r></w:p></w:body></w:document>')
+                source, output = self.root / "broken-field.docx", self.root / "broken-field-out.docx"
+                write_package(source, package_parts(document))
+                output.write_bytes(b"keep")
+                with self.assertRaisesRegex(ValueError, "field"):
+                    replace_text(source, output, {"replacements": [{"old": "普通文字", "new": "changed"}]})
+                self.assertEqual(output.read_bytes(), b"keep")
+
+    def test_same_rule_overlapping_matches_are_rejected(self):
+        for text, old in (("aaa", "aa"), ("中文中文中文", "中文中文")):
+            with self.subTest(text=text):
+                document = f'<w:document xmlns:w="{W}"><w:body><w:p><w:r><w:t>{text}</w:t></w:r></w:p></w:body></w:document>'
+                source, output = self.root / "self-overlap.docx", self.root / "self-overlap-out.docx"
+                write_package(source, package_parts(document))
+                output.write_bytes(b"keep")
+                with self.assertRaisesRegex(ValueError, "Overlapping"):
+                    replace_text(source, output, {"replacements": [{"old": old, "new": "X"}]})
+                self.assertEqual(output.read_bytes(), b"keep")
+
+    def test_adjacent_matches_and_literal_search_remain_supported(self):
+        document = f'<w:document xmlns:w="{W}"><w:body><w:p><w:r><w:t>[][]</w:t></w:r></w:p></w:body></w:document>'
+        source, output = self.root / "adjacent.docx", self.root / "adjacent-out.docx"
+        write_package(source, package_parts(document))
+        replace_text(source, output, {"replacements": [{"old": "[]", "new": "中文", "count": 2}]})
+        with zipfile.ZipFile(output) as package:
+            tree = xmlio.fromstring(package.read("word/document.xml"))
+            self.assertEqual(next(tree.iter(f"{{{W}}}t")).text, "中文中文")
 
     def test_duplicate_relationships_and_missing_target_are_reported(self):
         extra = (

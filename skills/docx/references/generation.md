@@ -74,8 +74,8 @@
 |---|---|---|
 | heading | `text`, `level`, `format`, `align` | 明确提供 level，范围为 1–4；format 和 align 可选。 |
 | paragraph | `text` 或 `runs`, `format`, `align` | 不要同时给 text/runs；align 为 left、center、right、justify。 |
-| list | `items`, `ordered` | items 为字符串数组；仅单层项目符号或编号。 |
-| table | `rows`, `widths_mm`, `header`, `format`, `body_format`, `header_format` | rows 为规则二维字符串数组；可指定列宽；header 默认 false；其他格式字段均可省略。 |
+| list | `items`, `ordered`, `list_id`, `level` | items 为字符串数组；旧单层用法不变，命名实例可按明确层级续号。 |
+| table | `rows`, `widths_mm`, `header`, `header_rows`, `format`, `body_format`, `header_format` | rows 为规则二维数组，单元格为字符串或受限 text/image/borders 对象；可指定列宽及前置表头行数。 |
 | image | `path`, `width_mm`, `height_mm`, `alt` | 仅嵌入 PNG/JPEG；明确给定显示宽高。 |
 | page_break | 无其他字段 | 插入手动分页。 |
 
@@ -124,7 +124,7 @@
 
 在同一对象中仅提供 `line_spacing_pt` 或 `line_spacing_multiple` 之一；不要同时传入。后续层显式指定一种行距时替换前一层的行距模式，例如从固定 24pt 改为 1.5 倍。上述额外字段仅适用于表格文字样式；普通段落、标题的 `format` 不接受它们。
 
-按“内置表格文字默认值 → `styles.table_body` / `styles.table_header` → 当前表格的 `body_format` / `header_format`”逐字段覆盖。正文和表头分别计算，不要将 `body_format` 当作整张表格的通用文字覆盖；需要统一字体时分别设置两者。保持单元格为字符串，不要在 `rows` 中传入 run、段落或单元格对象。
+按“内置表格文字默认值 → `styles.table_body` / `styles.table_header` → 当前表格的 `body_format` / `header_format`”逐字段覆盖。正文和表头分别计算，不要将 `body_format` 当作整张表格的通用文字覆盖；需要统一字体时分别设置两者。单元格默认用字符串，或按 [列表与表格细节](generation-details.md) 使用严格的 text/image/borders 对象；不接受任意 run、段落或合并布局。
 
 在顶层 `table_format` 和表格块的 `format` 中使用同一组布局字段；按“内置布局默认值 → 顶层 `table_format` → 单表 `format`”覆盖：
 
@@ -138,14 +138,16 @@
 | `cell_fill` | 六位十六进制 RGB 或 `"none"`；所有单元格底色 | `"none"` |
 | `cell_margin_top_mm`、`cell_margin_bottom_mm` | 数值，0–50；单位 mm | 各 1 |
 | `cell_margin_left_mm`、`cell_margin_right_mm` | 数值，0–50；单位 mm | 各 1.5 |
-| `repeat_header` | 布尔值；仅在 `header: true` 时生效 | `true` |
+| `repeat_header` | 布尔值；对声明的所有前置表头行生效 | `true` |
 | `allow_row_split` | 布尔值；是否允许单行跨页拆分 | `false` |
 
 - 使用 `body_format.align` / `header_format.align` 控制文字水平对齐，使用 `format.align` 控制整张表的位置；不要混淆两者。
 - 省略 `widths_mm` 时均分页面可用宽度；指定列宽时保留原有规则。列宽包含单元格留白，换算到文档单位后左右留白之和须小于每列宽度。需要窄列时显式减小留白，不要依赖阅读器自动挤压表格。
 - 保持自动行高；不要传入 `row_height` 等未声明字段，不要以固定行高压缩内容。重复表头和避免拆行是分页请求，不保证超高行保持完整，也不验证实际页数。
-- 仅在 `header: true` 时将第一行作为表头；关闭 `repeat_header` 仅关闭重复，不取消表头格式。省略 `header` 时，不要自动识别第一行。
+- `header: true` 将第一行作为表头，`header_rows` 可明确指定连续前置表头数量；关闭 `repeat_header` 仅关闭重复，不取消表头格式。未声明表头时，不自动识别第一行。
 - 使用 `border_style: "none"` 关闭边框，使用 `cell_fill: "none"` 清除全局底色；不要使用 `null` 表示关闭。所有提供的字段均须有效，即使之后被覆盖或当前不生效；拒绝未知字段、错误类型和非有限数值。
+
+使用 `format.borders` 逐边设置表格边框，使用单元格对象的 `borders` 覆盖其 top/left/bottom/right；按 [列表与表格细节](generation-details.md) 核对继承、共享边冲突、层级续号、`header_rows` 和单元格图片规则。
 
 保留上文原有中英文示例的内容。需要覆盖表格样式时，使用下面的完整中英混排示例；其中的 14pt 是显式覆盖，默认仍为 16pt：
 

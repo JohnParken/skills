@@ -25,7 +25,8 @@ class StdlibEnvironmentTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_runtime_imports_are_standard_library_or_skill_local(self):
-        local = {"office", "helpers", "validators", "xmlio", "create_docx", "read_docx", "edit_docx"}
+        local = {"office", "helpers", "validators", "xmlio", "create_docx", "read_docx", "edit_docx",
+                 "edit_structure"}
         for path in SCRIPTS.rglob("*.py"):
             with self.subTest(script=path.relative_to(SCRIPTS)):
                 tree = ast.parse(path.read_text())

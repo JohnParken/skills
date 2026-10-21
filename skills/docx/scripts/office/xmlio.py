@@ -73,4 +73,7 @@ def parse(path):
 
 
 def parse_dom(data):
-    return minidom.parseString(_checked(data))
+    try:
+        return minidom.parseString(_checked(data))
+    except expat.ExpatError as exc:
+        raise ValueError(f"Invalid XML: {exc}") from exc

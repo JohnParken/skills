@@ -107,6 +107,7 @@ _TABLE_LAYOUT_DEFAULTS = {
     "cell_margin_left_mm": 1.5, "cell_margin_right_mm": 1.5,
     "repeat_header": True, "allow_row_split": False,
 }
+_TABLE_BORDER_EDGES = {"top", "bottom", "left", "right", "insideH", "insideV"}
 
 
 def _q(namespace: str, local: str) -> str:
@@ -202,11 +203,13 @@ def _validate_table_text_fields(value: Any, label: str) -> dict:
 
 
 def _validate_table_layout(value: Any, label: str) -> dict:
-    fields = _object(value, label, set(_TABLE_LAYOUT_DEFAULTS))
+    fields = _object(value, label, set(_TABLE_LAYOUT_DEFAULTS) | {"borders"})
     result: dict[str, Any] = {}
     for key, field_value in fields.items():
         field_label = f"{label}.{key}"
-        if key == "align":
+        if key == "borders":
+            result[key] = _validate_borders(field_value, field_label)
+        elif key == "align":
             if not isinstance(field_value, str) or field_value not in {"left", "center", "right"}:
                 raise ValueError(f"{field_label} must be left, center, or right")
             result[key] = field_value
@@ -239,10 +242,92 @@ def _validate_table_layout(value: Any, label: str) -> dict:
     return result
 
 
-def _merge_table_layout(base: dict, layer: dict) -> dict:
-    result = base.copy()
-    result.update(layer)
+def _validate_borders(value: Any, label: str) -> dict:
+    edges = _object(value, label, _TABLE_BORDER_EDGES)
+    result = {}
+    for edge, value in edges.items():
+        fields = _object(value, f"{label}.{edge}", {"style", "width_pt", "color"})
+        border = {}
+        if "style" in fields:
+            style = fields["style"]
+            if not isinstance(style, str) or style not in {"single", "none"}:
+                raise ValueError(f"{label}.{edge}.style must be single or none")
+            border["style"] = style
+        if "width_pt" in fields:
+            border["width_pt"] = _number(fields["width_pt"], f"{label}.{edge}.width_pt", 0.25, 12)
+        if "color" in fields:
+            color = _text(fields["color"], f"{label}.{edge}.color", allow_empty=False)
+            if not _COLOR_RE.fullmatch(color):
+                raise ValueError(f"{label}.{edge}.color must be six hexadecimal RGB characters")
+            border["color"] = color.upper()
+        result[edge] = border
     return result
+
+
+def _merge_table_layout(base: dict, layer: dict) -> dict:
+    result = {key: value for key, value in base.items() if key != "borders"}
+    result.update({key: value for key, value in layer.items() if key != "borders"})
+    if "borders" in base or "borders" in layer:
+        borders = {edge: fields.copy() for edge, fields in base.get("borders", {}).items()}
+        for edge, fields in layer.get("borders", {}).items():
+            borders.setdefault(edge, {}).update(fields)
+        result["borders"] = borders
+    return result
+
+
+def _resolved_border(layout: dict, edge: str) -> dict:
+    result = {"style": layout["border_style"], "width_pt": layout["border_width_pt"],
+              "color": layout["border_color"]}
+    result.update(layout.get("borders", {}).get(edge, {}))
+    return result
+
+
+def _border_attributes(border: dict) -> dict:
+    if border["style"] == "none":
+        return {_q(W, "val"): "nil"}
+    return {_q(W, "val"): "single", _q(W, "sz"): str(int(border["width_pt"] * 8 + 0.5)),
+            _q(W, "space"): "0", _q(W, "color"): border["color"]}
+
+
+def _cell_borders(rows: list, layout: dict, label: str) -> None:
+    """Resolve explicit cell edges and make shared boundaries unambiguous.
+
+    Mirror a single explicit override to its neighbour. Two explicit overrides
+    must encode the same border; never rely on a reader's border conflict rules.
+    Cells without any explicit or mirrored override keep the old XML output.
+    """
+    row_count, column_count = len(rows), len(rows[0])
+    resolved = {}
+    for row_index, row in enumerate(rows):
+        for column, cell in enumerate(row):
+            if not isinstance(cell, dict):
+                continue
+            for edge, fields in cell.get("borders", {}).items():
+                table_edge = edge
+                if edge == "top" and row_index > 0 or edge == "bottom" and row_index < row_count - 1:
+                    table_edge = "insideH"
+                elif edge == "left" and column > 0 or edge == "right" and column < column_count - 1:
+                    table_edge = "insideV"
+                border = _resolved_border(layout, table_edge)
+                border.update(fields)
+                resolved[row_index, column, edge] = border
+    for (row_index, column, edge), border in list(resolved.items()):
+        adjacent = {"top": (row_index - 1, column, "bottom"),
+                    "bottom": (row_index + 1, column, "top"),
+                    "left": (row_index, column - 1, "right"),
+                    "right": (row_index, column + 1, "left")}[edge]
+        other_row, other_column, _ = adjacent
+        if not (0 <= other_row < row_count and 0 <= other_column < column_count):
+            continue
+        if adjacent in resolved and _border_attributes(resolved[adjacent]) != _border_attributes(border):
+            raise ValueError(f"{label}.rows[{row_index}][{column}].borders.{edge} conflicts with the adjacent cell border")
+        resolved[adjacent] = border.copy()
+    for (row_index, column, edge), border in resolved.items():
+        cell = rows[row_index][column]
+        if isinstance(cell, str):
+            cell = {"text": cell, "image": None}
+            rows[row_index][column] = cell
+        cell.setdefault("borders", {})[edge] = border
 
 
 def _validated_styles(value: Any) -> dict[str, dict]:
@@ -396,6 +481,7 @@ def _validate_spec(spec: Any, base_dir: Path) -> dict:
         raise ValueError("blocks must be an array")
     blocks: list[dict] = []
     image_paths: list[Path] = []
+    shared_lists = {}
     for index, value in enumerate(blocks_value):
         label = f"blocks[{index}]"
         if not isinstance(value, dict):
@@ -433,16 +519,41 @@ def _validate_spec(spec: Any, base_dir: Path) -> dict:
                 content = [_validate_run(run, f"{label}.runs[{i}]") for i, run in enumerate(block["runs"])]
             blocks.append({"type": kind, "content": content, "format": block_format, "align": align})
         elif kind == "list":
-            block = _object(value, label, {"type", "items", "ordered"}, {"type", "items", "ordered"})
+            block = _object(value, label, {"type", "items", "ordered", "list_id", "level"},
+                            {"type", "items", "ordered"})
             if not isinstance(block["ordered"], bool):
                 raise ValueError(f"{label}.ordered must be a boolean")
             if not isinstance(block["items"], list):
                 raise ValueError(f"{label}.items must be an array")
             items = [_text(item, f"{label}.items[{i}]") for i, item in enumerate(block["items"])]
-            blocks.append({"type": kind, "items": items, "ordered": block["ordered"]})
+            level = block.get("level", 0)
+            if type(level) is not int or not 0 <= level <= 8:
+                raise ValueError(f"{label}.level must be an integer from 0 to 8")
+            list_id = None
+            if "list_id" in block:
+                list_id = _single_line_text(block["list_id"], f"{label}.list_id")
+                if list_id != list_id.strip():
+                    raise ValueError(f"{label}.list_id cannot contain edge whitespace")
+                if not items:
+                    raise ValueError(f"{label}: a named list must contain at least one item")
+                if list_id not in shared_lists:
+                    if level != 0:
+                        raise ValueError(f"{label}: a named list must begin at level 0")
+                    shared_lists[list_id] = {"ordered": block["ordered"], "last_level": level}
+                previous = shared_lists[list_id]
+                if previous["ordered"] != block["ordered"]:
+                    raise ValueError(f"{label}: ordered must stay consistent for one list_id")
+                if level > previous["last_level"] + 1:
+                    raise ValueError(f"{label}: a named list cannot skip an intervening parent level")
+                if items:
+                    previous["last_level"] = level
+            elif level != 0:
+                raise ValueError(f"{label}: a nonzero level requires list_id")
+            blocks.append({"type": kind, "items": items, "ordered": block["ordered"],
+                           "list_id": list_id, "level": level})
         elif kind == "table":
             block = _object(value, label, {
-                "type", "rows", "widths_mm", "header", "format", "body_format", "header_format",
+                "type", "rows", "widths_mm", "header", "header_rows", "format", "body_format", "header_format",
             }, {"type", "rows"})
             if not isinstance(block["rows"], list) or not block["rows"]:
                 raise ValueError(f"{label}.rows must be a non-empty array")
@@ -455,10 +566,15 @@ def _validate_spec(spec: Any, base_dir: Path) -> dict:
                     columns = len(row)
                 elif len(row) != columns:
                     raise ValueError(f"{label}.rows must be rectangular")
-                rows.append([_text(cell, f"{label}.rows[{row_index}][{col}]") for col, cell in enumerate(row)])
+                rows.append(list(row))
             assert columns is not None
             if "header" in block and not isinstance(block["header"], bool):
                 raise ValueError(f"{label}.header must be a boolean")
+            header_rows = block.get("header_rows", 1 if block.get("header", False) else 0)
+            if type(header_rows) is not int or not 0 <= header_rows <= len(rows):
+                raise ValueError(f"{label}.header_rows must be an integer from 0 to the row count")
+            if "header" in block and "header_rows" in block and header_rows != int(block["header"]):
+                raise ValueError(f"{label}.header and header_rows conflict; choose one header declaration")
             layout_overrides = _validate_table_layout(block["format"], f"{label}.format") \
                 if "format" in block else {}
             body_overrides = _validate_table_text_fields(block["body_format"], f"{label}.body_format") \
@@ -483,8 +599,43 @@ def _validate_spec(spec: Any, base_dir: Path) -> dict:
                 + _twips(resolved_layout["cell_margin_right_mm"])
             if any(width - horizontal_padding <= 0 for width in widths_twips):
                 raise ValueError(f"{label} cell margins must leave positive content width in every column")
-            blocks.append({"type": kind, "rows": rows, "widths_twips": widths_twips,
-                           "header": block.get("header", False), "format": resolved_layout,
+            parsed_rows = []
+            vertical_padding = _twips(resolved_layout["cell_margin_top_mm"]) \
+                + _twips(resolved_layout["cell_margin_bottom_mm"])
+            for row_index, row in enumerate(rows):
+                parsed = []
+                for column, cell in enumerate(row):
+                    cell_label = f"{label}.rows[{row_index}][{column}]"
+                    if isinstance(cell, str):
+                        parsed.append(_text(cell, cell_label))
+                        continue
+                    fields = _object(cell, cell_label, {"text", "image", "borders"})
+                    if not ({"text", "image"} & fields.keys()):
+                        raise ValueError(f"{cell_label} must contain text and/or image")
+                    text = _text(fields.get("text", ""), f"{cell_label}.text")
+                    normalized = {"text": text, "image": None}
+                    if "borders" in fields:
+                        _object(fields["borders"], f"{cell_label}.borders", {"top", "left", "bottom", "right"})
+                        normalized["borders"] = _validate_borders(fields["borders"], f"{cell_label}.borders")
+                    if "image" in fields:
+                        image_label = f"{cell_label}.image"
+                        image_fields = _object(fields["image"], image_label,
+                                               {"path", "width_mm", "height_mm", "alt"},
+                                               {"path", "width_mm", "height_mm", "alt"})
+                        image_width = _number(image_fields["width_mm"], f"{image_label}.width_mm", 0.1, _MAX_PAGE_MM)
+                        image_height = _number(image_fields["height_mm"], f"{image_label}.height_mm", 0.1, _MAX_PAGE_MM)
+                        if (_emu(image_width) > (widths_twips[column] - horizontal_padding) * 635
+                                or _emu(image_height) > (available_height - vertical_padding) * 635):
+                            raise ValueError(f"{image_label} dimensions exceed the cell width/page content height")
+                        alt = _text(image_fields["alt"], f"{image_label}.alt")
+                        image = _image(image_fields["path"], image_width, image_height, base_dir, alt)
+                        image_paths.append(image["image_path"])
+                        normalized["image"] = image
+                    parsed.append(normalized)
+                parsed_rows.append(parsed)
+            _cell_borders(parsed_rows, resolved_layout, label)
+            blocks.append({"type": kind, "rows": parsed_rows, "widths_twips": widths_twips,
+                           "header": header_rows > 0, "header_rows": header_rows, "format": resolved_layout,
                            "body_format": resolved_body, "header_format": resolved_header})
         elif kind == "image":
             block = _object(value, label, {"type", "path", "width_mm", "height_mm", "alt"},
@@ -589,7 +740,8 @@ def _append_paragraph_properties(props: ET.Element, formatting: dict, *, outline
 def _paragraph(parent: ET.Element, *, text: str | None = None, runs: list[dict] | None = None,
                style: str | None = None, formatting: dict | None = None,
                num_id: int | None = None, bold: bool = False,
-               outline_level: int | None = None, keep_next: bool = False) -> ET.Element:
+               outline_level: int | None = None, keep_next: bool = False,
+               list_level: int = 0) -> ET.Element:
     paragraph = ET.SubElement(parent, _q(W, "p"))
     if style or formatting or num_id is not None or outline_level is not None or keep_next:
         props = ET.SubElement(paragraph, _q(W, "pPr"))
@@ -599,7 +751,7 @@ def _paragraph(parent: ET.Element, *, text: str | None = None, runs: list[dict] 
             ET.SubElement(props, _q(W, "keepNext"))
         if num_id is not None:
             num_props = ET.SubElement(props, _q(W, "numPr"))
-            ET.SubElement(num_props, _q(W, "ilvl"), {_q(W, "val"): "0"})
+            ET.SubElement(num_props, _q(W, "ilvl"), {_q(W, "val"): str(list_level)})
             ET.SubElement(num_props, _q(W, "numId"), {_q(W, "val"): str(num_id)})
         _append_paragraph_properties(props, formatting or {}, outline_level=outline_level)
     if text is not None:
@@ -702,35 +854,43 @@ def _styles_xml(style_formats: dict[str, dict]) -> bytes:
     return ET.tostring(styles, encoding="UTF-8", xml_declaration=True)
 
 
-def _numbering_xml(ordered_ids: list[int]) -> bytes:
+def _numbering_xml(instances: list[dict]) -> bytes:
     numbering = ET.Element(_q(W, "numbering"))
-    for abstract_id, ordered in ((0, False), (1, True)):
+    definitions = [(0, False, False), (1, True, False)]
+    for ordered in (False, True):
+        if any(instance["ordered"] == ordered and instance["multilevel"] for instance in instances):
+            definitions.append((3 if ordered else 2, ordered, True))
+    for abstract_id, ordered, multilevel in definitions:
         abstract = ET.SubElement(numbering, _q(W, "abstractNum"), {
             _q(W, "abstractNumId"): str(abstract_id),
         })
-        ET.SubElement(abstract, _q(W, "multiLevelType"), {_q(W, "val"): "singleLevel"})
-        level = ET.SubElement(abstract, _q(W, "lvl"), {_q(W, "ilvl"): "0"})
-        ET.SubElement(level, _q(W, "start"), {_q(W, "val"): "1"})
-        ET.SubElement(level, _q(W, "numFmt"), {
-            _q(W, "val"): "decimal" if ordered else "bullet",
+        ET.SubElement(abstract, _q(W, "multiLevelType"), {
+            _q(W, "val"): "multilevel" if multilevel else "singleLevel",
         })
-        ET.SubElement(level, _q(W, "lvlText"), {
-            _q(W, "val"): "%1." if ordered else "•",
-        })
-        ET.SubElement(level, _q(W, "lvlJc"), {_q(W, "val"): "left"})
-        ppr = ET.SubElement(level, _q(W, "pPr"))
-        tabs = ET.SubElement(ppr, _q(W, "tabs"))
-        ET.SubElement(tabs, _q(W, "tab"), {_q(W, "val"): "num", _q(W, "pos"): "720"})
-        ET.SubElement(ppr, _q(W, "ind"), {
-            _q(W, "left"): "720", _q(W, "hanging"): "360",
-        })
-    for num_id, ordered in enumerate(ordered_ids, start=1):
+        for index in range(9 if multilevel else 1):
+            level = ET.SubElement(abstract, _q(W, "lvl"), {_q(W, "ilvl"): str(index)})
+            ET.SubElement(level, _q(W, "start"), {_q(W, "val"): "1"})
+            ET.SubElement(level, _q(W, "numFmt"), {
+                _q(W, "val"): "decimal" if ordered else "bullet",
+            })
+            if multilevel and index:
+                ET.SubElement(level, _q(W, "lvlRestart"), {_q(W, "val"): str(index)})
+            label = ".".join(f"%{position + 1}" for position in range(index + 1)) + "." if ordered else "•"
+            ET.SubElement(level, _q(W, "lvlText"), {_q(W, "val"): label})
+            ET.SubElement(level, _q(W, "lvlJc"), {_q(W, "val"): "left"})
+            ppr = ET.SubElement(level, _q(W, "pPr"))
+            tabs = ET.SubElement(ppr, _q(W, "tabs"))
+            left = str(720 * (index + 1))
+            ET.SubElement(tabs, _q(W, "tab"), {_q(W, "val"): "num", _q(W, "pos"): left})
+            ET.SubElement(ppr, _q(W, "ind"), {_q(W, "left"): left, _q(W, "hanging"): "360"})
+    for num_id, instance in enumerate(instances, start=1):
         num = ET.SubElement(numbering, _q(W, "num"), {_q(W, "numId"): str(num_id)})
-        ET.SubElement(num, _q(W, "abstractNumId"), {_q(W, "val"): "1" if ordered else "0"})
+        abstract_id = int(instance["ordered"]) + (2 if instance["multilevel"] else 0)
+        ET.SubElement(num, _q(W, "abstractNumId"), {_q(W, "val"): str(abstract_id)})
     return ET.tostring(numbering, encoding="UTF-8", xml_declaration=True)
 
 
-def _table(parent: ET.Element, block: dict) -> None:
+def _table(parent: ET.Element, block: dict, next_drawing_id: int) -> list[dict]:
     table = ET.SubElement(parent, _q(W, "tbl"))
     props = ET.SubElement(table, _q(W, "tblPr"))
     layout = block["format"]
@@ -738,16 +898,8 @@ def _table(parent: ET.Element, block: dict) -> None:
     ET.SubElement(props, _q(W, "tblW"), {_q(W, "w"): str(total), _q(W, "type"): "dxa"})
     ET.SubElement(props, _q(W, "jc"), {_q(W, "val"): layout["align"]})
     borders = ET.SubElement(props, _q(W, "tblBorders"))
-    border_attrs = {_q(W, "val"): "nil"}
-    if layout["border_style"] == "single":
-        border_attrs = {
-            _q(W, "val"): "single",
-            _q(W, "sz"): str(int(layout["border_width_pt"] * 8 + 0.5)),
-            _q(W, "space"): "0",
-            _q(W, "color"): layout["border_color"],
-        }
     for edge in ("top", "left", "bottom", "right", "insideH", "insideV"):
-        ET.SubElement(borders, _q(W, edge), border_attrs)
+        ET.SubElement(borders, _q(W, edge), _border_attributes(_resolved_border(layout, edge)))
     if layout["cell_fill"] != "none":
         ET.SubElement(props, _q(W, "shd"), {
             _q(W, "val"): "clear", _q(W, "fill"): layout["cell_fill"],
@@ -762,26 +914,39 @@ def _table(parent: ET.Element, block: dict) -> None:
     grid = ET.SubElement(table, _q(W, "tblGrid"))
     for width in block["widths_twips"]:
         ET.SubElement(grid, _q(W, "gridCol"), {_q(W, "w"): str(width)})
+    images = []
     for row_index, values in enumerate(block["rows"]):
         row = ET.SubElement(table, _q(W, "tr"))
-        repeat_header = row_index == 0 and block["header"] and layout["repeat_header"]
+        is_header = row_index < block["header_rows"]
+        repeat_header = is_header and layout["repeat_header"]
         if not layout["allow_row_split"] or repeat_header:
             row_props = ET.SubElement(row, _q(W, "trPr"))
             if not layout["allow_row_split"]:
                 ET.SubElement(row_props, _q(W, "cantSplit"), {_q(W, "val"): "true"})
             if repeat_header:
                 ET.SubElement(row_props, _q(W, "tblHeader"), {_q(W, "val"): "true"})
-        for text, width in zip(values, block["widths_twips"]):
+        for content, width in zip(values, block["widths_twips"]):
             cell = ET.SubElement(row, _q(W, "tc"))
             cell_props = ET.SubElement(cell, _q(W, "tcPr"))
             ET.SubElement(cell_props, _q(W, "tcW"), {
                 _q(W, "w"): str(width), _q(W, "type"): "dxa",
             })
+            if isinstance(content, dict) and content.get("borders"):
+                cell_edges = ET.SubElement(cell_props, _q(W, "tcBorders"))
+                for edge in ("top", "left", "bottom", "right"):
+                    if edge in content["borders"]:
+                        ET.SubElement(cell_edges, _q(W, edge), _border_attributes(content["borders"][edge]))
             ET.SubElement(cell_props, _q(W, "vAlign"), {_q(W, "val"): layout["vertical_align"]})
-            is_header = row_index == 0 and block["header"]
             style_name = "TableHeader" if is_header else "TableBody"
             text_format = block["header_format"] if is_header else block["body_format"]
-            _paragraph(cell, text=text, style=style_name, formatting=text_format)
+            text = content if isinstance(content, str) else content["text"]
+            paragraph = _paragraph(cell, text=text, style=style_name, formatting=text_format)
+            if isinstance(content, dict) and content["image"] is not None:
+                image = content["image"]
+                _add_picture(paragraph, image, next_drawing_id)
+                images.append(image)
+                next_drawing_id += 1
+    return images
 
 
 def _add_picture(parent: ET.Element, block: dict, drawing_id: int) -> None:
@@ -840,13 +1005,14 @@ def _related_text_xml(root_name: str, text: str, *, page_numbers: bool = False) 
     return ET.tostring(root, encoding="UTF-8", xml_declaration=True)
 
 
-def _document_xml(spec: dict) -> tuple[bytes, list[dict], list[bool]]:
+def _document_xml(spec: dict) -> tuple[bytes, list[dict], list[dict]]:
     root = ET.Element(_q(W, "document"))
     body = ET.SubElement(root, _q(W, "body"))
-    ordered_ids: list[bool] = []
+    instances: list[dict] = []
     image_blocks: list[dict] = []
     next_num_id = 1
     next_drawing_id = 1
+    shared_ids = {}
     for block in spec["blocks"]:
         kind = block["type"]
         if kind == "heading":
@@ -867,13 +1033,21 @@ def _document_xml(spec: dict) -> tuple[bytes, list[dict], list[bool]]:
             else:
                 _paragraph(body, runs=block["content"], style="BodyText", formatting=formatting)
         elif kind == "list":
-            ordered_ids.append(block["ordered"])
-            block["num_id"] = next_num_id
-            next_num_id += 1
+            identifier = block["list_id"]
+            if identifier is None or identifier not in shared_ids:
+                block["num_id"] = next_num_id
+                instances.append({"ordered": block["ordered"], "multilevel": identifier is not None})
+                if identifier is not None:
+                    shared_ids[identifier] = next_num_id
+                next_num_id += 1
+            else:
+                block["num_id"] = shared_ids[identifier]
             for item in block["items"]:
-                _paragraph(body, text=item, num_id=block["num_id"])
+                _paragraph(body, text=item, num_id=block["num_id"], list_level=block["level"])
         elif kind == "table":
-            _table(body, block)
+            images = _table(body, block, next_drawing_id)
+            image_blocks.extend(images)
+            next_drawing_id += len(images)
         elif kind == "image":
             paragraph = ET.SubElement(body, _q(W, "p"))
             _add_picture(paragraph, block, next_drawing_id)
@@ -906,7 +1080,7 @@ def _document_xml(spec: dict) -> tuple[bytes, list[dict], list[bool]]:
         _q(W, "header"): str(min(720, page["top"])), _q(W, "footer"): str(min(720, page["bottom"])),
         _q(W, "gutter"): "0",
     })
-    return ET.tostring(root, encoding="UTF-8", xml_declaration=True), image_blocks, ordered_ids
+    return ET.tostring(root, encoding="UTF-8", xml_declaration=True), image_blocks, instances
 
 
 def _relationship_xml(relationships: list[tuple[str, str, str]]) -> bytes:
@@ -956,8 +1130,17 @@ def _package_parts(spec: dict) -> dict[str, bytes]:
             name = f"image{index}.{block['extension']}"
             block["media_name"] = name
             block["rid"] = add_relationship("image", f"media/{name}")
+        elif block["type"] == "table":
+            for row_index, row in enumerate(block["rows"], 1):
+                for column_index, cell in enumerate(row, 1):
+                    if not isinstance(cell, dict) or cell["image"] is None:
+                        continue
+                    image = cell["image"]
+                    name = f"image{index}_r{row_index}_c{column_index}.{image['extension']}"
+                    image["media_name"] = name
+                    image["rid"] = add_relationship("image", f"media/{name}")
 
-    document_xml, image_blocks, ordered_ids = _document_xml(spec)
+    document_xml, image_blocks, instances = _document_xml(spec)
     parts = {
         "[Content_Types].xml": _content_types_xml(
             {block["extension"] for block in image_blocks},
@@ -971,7 +1154,7 @@ def _package_parts(spec: dict) -> dict[str, bytes]:
         "word/document.xml": document_xml,
         "word/_rels/document.xml.rels": _relationship_xml(relationships),
         "word/styles.xml": _styles_xml(spec["styles"]),
-        "word/numbering.xml": _numbering_xml(ordered_ids),
+        "word/numbering.xml": _numbering_xml(instances),
     }
     if spec["header"] is not None:
         parts["word/header1.xml"] = _related_text_xml("hdr", spec["header"])

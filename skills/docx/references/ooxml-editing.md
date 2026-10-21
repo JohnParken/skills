@@ -2,6 +2,8 @@
 
 ## 放置批注锚点
 
+自动流程优先使用 [批注事务管理](comments-management.md)，在其严格范围内自动生成锚点并核验元数据。下述 `comment.py` 保留为低层定义工具，仍需手工补正文锚点；解包目录入口不等同于整个多文件事务，不用于自动生命周期管理。
+
 使用 `scripts/comment.py` 维护 `comments.xml`、`commentsExtended.xml`、`commentsIds.xml`、`commentsExtensible.xml`、关系和内容类型。不要只生成批注部件而遗漏正文锚点。
 
 按脚本分配的 ID，在目标段落中添加以下标记；将其放在 `w:p` 的直接子节点中，禁止放入 `w:r`。

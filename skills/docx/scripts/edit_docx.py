@@ -16,13 +16,19 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from office.package import pack_document, unpack_document
+from office.helpers import XML_SPACE, reject_signed_package
 from office.xmlio import parse_dom, read_xml
 from office.validators.structure import StructureValidator, W
 
 XML_NS = "http://www.w3.org/XML/1998/namespace"
+XMLNS_NS = "http://www.w3.org/2000/xmlns/"
 SAFE_ANCESTORS = {"r", "p", "tc", "tr", "tbl", "body", "document", "hdr", "ftr"}
 BLOCKED_PARAGRAPH = {"fldChar", "instrText", "commentRangeStart", "commentRangeEnd",
-                     "commentReference", "ins", "del", "moveFrom", "moveTo"}
+                     "commentReference", "ins", "del", "moveFrom", "moveTo",
+                     "moveFromRangeStart", "moveFromRangeEnd", "moveToRangeStart", "moveToRangeEnd"}
+PLAIN_RUN_CHILDREN = {"rPr", "t", "tab", "br", "cr", "noBreakHyphen", "softHyphen"}
+MOVE_RANGE_STARTS = {"moveFromRangeStart": "from", "moveToRangeStart": "to"}
+MOVE_RANGE_ENDS = {"moveFromRangeEnd": "from", "moveToRangeEnd": "to"}
 
 
 def _text(node):
@@ -33,7 +39,15 @@ def _text(node):
 def _eligible(node):
     if node.parentNode.namespaceURI != W or node.parentNode.localName != "r":
         return False
-    if any(c.nodeType == c.ELEMENT_NODE for c in node.childNodes):
+    if any(c.nodeType not in (c.TEXT_NODE, c.CDATA_SECTION_NODE) for c in node.childNodes):
+        return False
+    if any(attr.namespaceURI != XMLNS_NS and not (
+        attr.namespaceURI == XML_NS and attr.localName == "space"
+    ) for attr in node.attributes.values()):
+        return False
+    if any(c.nodeType == c.ELEMENT_NODE and (
+        c.namespaceURI != W or c.localName not in PLAIN_RUN_CHILDREN
+    ) for c in node.parentNode.childNodes):
         return False
     parent = node.parentNode
     while parent.nodeType == parent.ELEMENT_NODE:
@@ -44,6 +58,97 @@ def _eligible(node):
                 return False
         parent = parent.parentNode
     return True
+
+
+def _range_text_nodes(dom):
+    """Exclude field/comment/movement text across paragraph boundaries."""
+    blocked = set()
+    fields = []
+    comments = set()
+    moves = set()
+    seen_moves = set()
+    for node in dom.getElementsByTagName("*"):
+        if node.namespaceURI != W:
+            continue
+        name = node.localName
+        if name == "fldChar":
+            kind = node.getAttributeNS(W, "fldCharType")
+            if kind == "begin":
+                fields.append(False)
+            elif kind == "separate" and fields and not fields[-1]:
+                fields[-1] = True
+            elif kind == "end" and fields:
+                fields.pop()
+            else:
+                raise ValueError("Unbalanced or invalid complex field markers; editing is unsupported")
+        elif name == "commentRangeStart":
+            comments.add(node.getAttributeNS(W, "id"))
+        elif name == "commentRangeEnd":
+            comments.discard(node.getAttributeNS(W, "id"))
+        elif name in MOVE_RANGE_STARTS or name in MOVE_RANGE_ENDS:
+            value = node.getAttributeNS(W, "id")
+            key = (MOVE_RANGE_STARTS.get(name, MOVE_RANGE_ENDS.get(name)), value)
+            if not value.isascii() or not value.isdigit():
+                raise ValueError("Invalid movement range ID; editing is unsupported")
+            if name in MOVE_RANGE_STARTS:
+                if key in seen_moves:
+                    raise ValueError("Duplicate movement range; editing is unsupported")
+                seen_moves.add(key)
+                moves.add(key)
+            elif key not in moves:
+                raise ValueError("Unbalanced movement range; editing is unsupported")
+            else:
+                moves.remove(key)
+        elif name == "t" and (fields or comments or moves):
+            blocked.add(node)
+    if fields:
+        raise ValueError("Unclosed complex field; editing is unsupported")
+    if moves:
+        raise ValueError("Unclosed movement range; editing is unsupported")
+    return blocked
+
+
+def _preserves_space(node):
+    """Resolve the nearest explicit xml:space, including ancestor defaults."""
+    while node.nodeType == node.ELEMENT_NODE:
+        if node.hasAttributeNS(XML_NS, "space"):
+            value = node.getAttributeNS(XML_NS, "space")
+            if value not in ("default", "preserve"):
+                raise ValueError("Invalid xml:space; editing is unsupported")
+            return value == "preserve"
+        node = node.parentNode
+    return False
+
+
+def _same_xml(left, right):
+    """Compare every parsed node and attribute, including opaque extensions."""
+    pending = [(left, right)]
+    while pending:
+        left_node, right_node = pending.pop()
+        if (left_node.nodeType, left_node.nodeName, left_node.namespaceURI, left_node.nodeValue) != (
+            right_node.nodeType, right_node.nodeName, right_node.namespaceURI, right_node.nodeValue
+        ):
+            return False
+        left_attrs = _attribute_values(left_node)
+        right_attrs = _attribute_values(right_node)
+        if left_attrs != right_attrs or len(left_node.childNodes) != len(right_node.childNodes):
+            return False
+        pending.extend(zip(left_node.childNodes, right_node.childNodes))
+    return (left.version or "1.0") == (right.version or "1.0") and left.standalone == right.standalone
+
+
+def _attribute_values(node):
+    if node.attributes is None:
+        return []
+    return sorted((attr.name, attr.namespaceURI, attr.value) for attr in node.attributes.values())
+
+
+def _serialize_checked(dom):
+    data = dom.toxml(encoding="UTF-8", standalone=dom.standalone)
+    reopened = parse_dom(data)
+    if not _same_xml(dom, reopened):
+        raise ValueError("XML serialization cannot preserve all node/attribute values; editing is unsupported")
+    return data
 
 
 def replace_text(source, destination, specification, *, parts=None, require_no_placeholders=False):
@@ -80,8 +185,11 @@ def replace_text(source, destination, specification, *, parts=None, require_no_p
         raise ValueError("Only document.xml and numbered header/footer parts are supported")
     with tempfile.TemporaryDirectory(prefix="docx-edit-") as tmp:
         unpacked = unpack_document(source, Path(tmp) / "package")
-        if not StructureValidator(unpacked, extension=source.suffix.lower()).validate():
+        validator = StructureValidator(unpacked, extension=source.suffix.lower())
+        if not validator.validate():
             raise ValueError("Input failed basic structure checks")
+        reject_signed_package(validator.files, (kind for relationships in validator.relations.values()
+                                               for kind, _ in relationships.values()))
         counts = [0] * len(operations)
         changes = []
         documents = {}
@@ -91,14 +199,18 @@ def replace_text(source, destination, specification, *, parts=None, require_no_p
                 raise ValueError(f"Requested part is missing: {part}")
             dom = parse_dom(read_xml(path))
             documents[part] = dom
+            blocked_nodes = _range_text_nodes(dom)
             for node in dom.getElementsByTagNameNS(W, "t"):
-                if not _eligible(node):
+                if node in blocked_nodes or not _eligible(node):
                     continue
                 original = _text(node)
                 matches = []
                 for index, operation in enumerate(operations):
-                    for match in re.finditer(re.escape(operation["old"]), original):
-                        matches.append((match.start(), match.end(), operation["new"]))
+                    # Look ahead so overlapping occurrences of the same rule
+                    # are detected as well as overlaps between different rules.
+                    old = operation["old"]
+                    for match in re.finditer("(?=" + re.escape(old) + ")", original):
+                        matches.append((match.start(), match.start() + len(old), operation["new"]))
                         counts[index] += 1
                 matches.sort()
                 if any(left[1] > right[0] for left, right in zip(matches, matches[1:])):
@@ -107,6 +219,8 @@ def replace_text(source, destination, specification, *, parts=None, require_no_p
                 for start, end, value in reversed(matches):
                     updated = updated[:start] + value + updated[end:]
                 if matches:
+                    if not _preserves_space(node) and original != original.strip(XML_SPACE):
+                        raise ValueError("Unpreserved edge XML whitespace is ambiguous; editing is unsupported")
                     changes.append((part, node, updated))
         for operation, count in zip(operations, counts):
             expected = operation.get("count", 1)
@@ -119,11 +233,12 @@ def replace_text(source, destination, specification, *, parts=None, require_no_p
         for part, node, value in changes:
             for child in list(node.childNodes):
                 node.removeChild(child)
-            node.appendChild(node.ownerDocument.createTextNode(value))
+            if value:
+                node.appendChild(node.ownerDocument.createTextNode(value))
             node.setAttributeNS(XML_NS, "xml:space", "preserve")
             modified.add(part)
         for part in modified:
-            (unpacked / part).write_bytes(documents[part].toxml(encoding="UTF-8"))
+            (unpacked / part).write_bytes(_serialize_checked(documents[part]))
         if not StructureValidator(
             unpacked, extension=destination.suffix.lower(),
             require_no_placeholders=require_no_placeholders,

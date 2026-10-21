@@ -3,6 +3,8 @@
 from collections import Counter
 from pathlib import Path
 
+from .advanced import validate_numbering, validate_tables
+
 try:
     from .. import xmlio
     from ..helpers import MAX_MEMBERS, MAX_PACKAGE_BYTES, MAX_PART_BYTES, opc_target
@@ -31,6 +33,7 @@ class StructureValidator:
         self.extension = extension
         self.require_no_placeholders = require_no_placeholders
         self.errors = []
+        self.warnings = []
         self.roots = {}
         self.files = set()
         self.relations = {}
@@ -39,8 +42,12 @@ class StructureValidator:
     def error(self, message):
         self.errors.append(message)
 
+    def warning(self, message):
+        self.warnings.append(message)
+
     def validate(self):
         self.errors = []
+        self.warnings = []
         self.roots = {}
         self.files = set()
         self.relations = {}
@@ -51,10 +58,14 @@ class StructureValidator:
                 self._types()
                 self._relationships()
                 self._word()
+                validate_tables(self.roots, self.error, self.warning)
+                validate_numbering(self.roots, self.error, self.warning)
         except (OSError, ValueError) as exc:
             self.error(str(exc))
         for message in self.errors:
             print(f"FAILED - {message}")
+        for message in self.warnings:
+            print(f"WARNING - {message}")
         return not self.errors
 
     def _load(self):

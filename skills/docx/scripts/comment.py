@@ -13,7 +13,7 @@ Usage:
 
 The comment ID is auto-assigned (max existing + 1) unless --id is given.
 Plain text is XML-escaped automatically; if you pass already-escaped text
-(e.g. &amp;, &#x2019;) use --raw to skip escaping.
+(e.g. &amp;, &#x2019;) use --raw for escaped text only, never element markup.
 
 After running, add markers to word/document.xml so the comment is visible:
   <w:commentRangeStart w:id="N"/>
@@ -35,10 +35,11 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from office.xmlio import parse_dom, read_xml
+from edit_docx import XMLNS_NS, _serialize_checked
 from xml.parsers.expat import ExpatError
 from xml.sax.saxutils import escape as xml_escape
 
-from office.helpers import opc_target, rezip as _rezip, safe_extract as _safe_extract
+from office.helpers import opc_target, reject_signed_package, rezip as _rezip, safe_extract as _safe_extract
 
 TEMPLATE_DIR = Path(__file__).resolve().parents[1] / "assets" / "comments"
 NS = {
@@ -84,22 +85,8 @@ Nest markers inside parent {pid}'s markers (direct children of w:p, never inside
   <w:r><w:rPr><w:rStyle w:val="CommentReference"/></w:rPr><w:commentReference w:id="{pid}"/></w:r>
   <w:r><w:rPr><w:rStyle w:val="CommentReference"/></w:rPr><w:commentReference w:id="{cid}"/></w:r>"""
 
-SMART_QUOTE_ENTITIES = {
-    "“": "&#x201C;",
-    "”": "&#x201D;",
-    "‘": "&#x2018;",
-    "’": "&#x2019;",
-}
-
-
 def _generate_hex_id() -> str:
     return f"{random.randint(0, 0x7FFFFFFE):08X}"
-
-
-def _encode_smart_quotes(text: str) -> str:
-    for char, entity in SMART_QUOTE_ENTITIES.items():
-        text = text.replace(char, entity)
-    return text
 
 
 def _append_xml(xml_path: Path, root_tag: str, content: str) -> None:
@@ -113,14 +100,13 @@ def _append_xml(xml_path: Path, root_tag: str, content: str) -> None:
         existing = root.getAttribute("xmlns:" + key)
         if existing and existing != uri:
             raise ValueError(f"Conflicting namespace prefix: {key}")
-        root.setAttribute("xmlns:" + key, uri)
+        root.setAttributeNS(XMLNS_NS, "xmlns:" + key, uri)
     ns_attrs = " ".join(f'xmlns:{k}="{v}"' for k, v in NS.items())
     wrapper_dom = parse_dom(f"<root {ns_attrs}>{content}</root>")
     for child in wrapper_dom.documentElement.childNodes:  
         if child.nodeType == child.ELEMENT_NODE:
             root.appendChild(dom.importNode(child, True))
-    output = _encode_smart_quotes(dom.toxml(encoding="UTF-8").decode("utf-8"))
-    xml_path.write_text(output, encoding="utf-8")
+    xml_path.write_bytes(_serialize_checked(dom))
 
 
 def _find_para_id(comments_path: Path, comment_id: int) -> str | None:
@@ -139,10 +125,12 @@ def _next_comment_id(comments_path: Path) -> int:
     dom = parse_dom(read_xml(comments_path))
     ids = []
     for c in dom.getElementsByTagNameNS(NS["w"], "comment"):
-        try:
-            ids.append(int(c.getAttributeNS(NS["w"], "id")))
-        except ValueError:
-            pass
+        value = c.getAttributeNS(NS["w"], "id")
+        if not value.isascii() or not value.isdigit() or len(value) > 10 or int(value) > 2 ** 31 - 1:
+            raise ValueError("Invalid existing comment ID")
+        ids.append(int(value))
+    if len(ids) != len(set(ids)):
+        raise ValueError("Duplicate existing comment IDs")
     return (max(ids) + 1) if ids else 0
 
 
@@ -222,7 +210,7 @@ def _ensure_comment_relationships(unpacked_dir: Path) -> None:
         next_rid += 1
         changed = True
     if changed:
-        rels_path.write_bytes(dom.toxml(encoding="UTF-8"))
+        rels_path.write_bytes(_serialize_checked(dom))
 
 
 def _ensure_comment_content_types(unpacked_dir: Path) -> None:
@@ -246,7 +234,80 @@ def _ensure_comment_content_types(unpacked_dir: Path) -> None:
         root.appendChild(override)  
         changed = True
     if changed:
-        ct_path.write_bytes(dom.toxml(encoding="UTF-8"))
+        ct_path.write_bytes(_serialize_checked(dom))
+
+
+def _unique_hex_id(used):
+    used = {value.upper() for value in used}
+    for _ in range(128):
+        value = _generate_hex_id()
+        if value.upper() not in used:
+            return value
+    raise ValueError("Unable to allocate a unique comment metadata ID")
+
+
+def _preflight(unpacked_dir, text, author, initials, comment_id, parent_id, raw):
+    if unpacked_dir.is_symlink() or not unpacked_dir.is_dir():
+        raise ValueError("Input must be a directory without symbolic links")
+    if any(path.is_symlink() for path in unpacked_dir.rglob("*")):
+        raise ValueError("Symbolic links in the package are unsupported")
+    files = [path for path in unpacked_dir.rglob("*") if path.is_file()]
+    relationship_types = []
+    for path in files:
+        if path.name.lower().endswith(".rels"):
+            dom = parse_dom(read_xml(path))
+            relationship_types.extend(node.getAttribute("Type")
+                                      for node in dom.getElementsByTagNameNS(REL_NS, "Relationship"))
+    reject_signed_package((path.relative_to(unpacked_dir).as_posix() for path in files), relationship_types)
+    for label, value in (("text", text), ("author", author), ("initials", initials)):
+        if not isinstance(value, str) or any(
+            ord(char) < 32 or 0xD800 <= ord(char) <= 0xDFFF or char in "\ufffe\uffff" for char in value
+        ):
+            raise ValueError(f"{label} must be single-line XML text")
+        if label == "author" and not value:
+            raise ValueError("author must be nonempty")
+    for label, value in (("comment_id", comment_id), ("parent_id", parent_id)):
+        if value is not None and (type(value) is not int or not 0 <= value <= 2 ** 31 - 1):
+            raise ValueError(f"{label} must be a nonnegative 32-bit integer")
+    if raw:
+        wrapper = parse_dom("<text>" + text + "</text>").documentElement
+        if any(child.nodeType != child.TEXT_NODE for child in wrapper.childNodes):
+            raise ValueError("raw accepts escaped text only, not markup")
+        if any(ord(char) < 32 for child in wrapper.childNodes for char in child.data):
+            raise ValueError("raw text must be single-line")
+    para_ids, durable_ids = set(), set()
+    comment_roots = {"word/comments.xml": (NS["w"], "comments"),
+                     "word/commentsExtended.xml": (NS["w15"], "commentsEx"),
+                     "word/commentsIds.xml": (NS["w16cid"], "commentsIds"),
+                     "word/commentsExtensible.xml": (NS["w16cex"], "commentsExtensible")}
+    expected_roots = {**comment_roots, "[Content_Types].xml": (CT_NS, "Types"),
+                      "word/_rels/document.xml.rels": (REL_NS, "Relationships"),
+                      "word/document.xml": (NS["w"], "document")}
+    for relative in ("[Content_Types].xml", "word/document.xml"):
+        if not (unpacked_dir / relative).is_file():
+            raise ValueError(f"Missing required package XML: {relative}")
+    for relative in ("[Content_Types].xml", "word/_rels/document.xml.rels",
+                     "word/comments.xml", "word/commentsExtended.xml", "word/commentsIds.xml",
+                     "word/commentsExtensible.xml", "word/document.xml"):
+        path = unpacked_dir / relative
+        if not path.is_file():
+            continue
+        dom = parse_dom(read_xml(path))
+        _serialize_checked(dom)
+        if (dom.documentElement.namespaceURI, dom.documentElement.localName) != expected_roots[relative]:
+            raise ValueError(f"Invalid package XML root: {relative}")
+        if relative in comment_roots:
+            for prefix, uri in NS.items():
+                existing = dom.documentElement.getAttribute("xmlns:" + prefix)
+                if existing and existing != uri:
+                    raise ValueError(f"Conflicting comment namespace prefix: {prefix}")
+        for node in dom.getElementsByTagName("*"):
+            for attr in node.attributes.values():
+                if attr.localName in {"paraId", "paraIdParent"} and attr.namespaceURI in NS.values():
+                    para_ids.add(attr.value)
+                if attr.localName == "durableId" and attr.namespaceURI in NS.values():
+                    durable_ids.add(attr.value)
+    return para_ids, durable_ids
 
 
 def add_comment(
@@ -259,6 +320,7 @@ def add_comment(
     raw: bool = False,
 ) -> tuple[int, str, str]:
     unpacked_dir = Path(unpacked_dir)
+    para_ids, durable_ids = _preflight(unpacked_dir, text, author, initials, comment_id, parent_id, raw)
     if not raw:
         text = xml_escape(text)
     author = xml_escape(author, {'"': "&quot;"})
@@ -268,8 +330,16 @@ def add_comment(
         raise FileNotFoundError(f"{word} not found (not an unpacked .docx?)")
 
     comments = word / "comments.xml"
+    next_id = _next_comment_id(comments)
     if comment_id is None:
-        comment_id = _next_comment_id(comments)
+        comment_id = next_id
+    if comment_id > 2 ** 31 - 1:
+        raise ValueError("Comment IDs exhausted")
+    if comments.exists():
+        dom = parse_dom(read_xml(comments))
+        if any(int(node.getAttributeNS(NS["w"], "id")) == comment_id
+               for node in dom.getElementsByTagNameNS(NS["w"], "comment")):
+            raise ValueError("Comment ID already exists")
 
     parent_para = None
     if parent_id is not None:
@@ -277,7 +347,7 @@ def add_comment(
         if not parent_para:
             raise ValueError(f"parent comment {parent_id} not found")
 
-    para_id, durable_id = _generate_hex_id(), _generate_hex_id()
+    para_id, durable_id = _unique_hex_id(para_ids), _unique_hex_id(durable_ids)
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     if not comments.exists():
