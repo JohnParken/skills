@@ -76,6 +76,54 @@ class PythonOnlyDocxTests(unittest.TestCase):
                 if name != "word/document.xml":
                     self.assertEqual(before.read(name), after.read(name), name)
 
+    def test_all_documented_json_examples_roundtrip(self):
+        documents = (ROOT / "docx/SKILL.md", ROOT / "docx/references/generation.md")
+        checked_text = []
+        for document in documents:
+            examples = re.findall(r"```json\n(.*?)```", document.read_text(encoding="utf-8"), re.S)
+            self.assertTrue(examples, document)
+            for index, example in enumerate(examples):
+                with self.subTest(document=document.name, example=index):
+                    spec = json.loads(example)
+                    source = self.work / "example.json"
+                    output = self.work / "example.docx"
+                    expected = []
+                    if "replacements" in spec:
+                        rules = spec["replacements"]
+                        template_spec = {"blocks": [
+                            {"type": "paragraph", "text": rule["old"]}
+                            for rule in rules for _ in range(rule.get("count", 1))
+                        ]}
+                        source.write_text(json.dumps(template_spec, ensure_ascii=False), encoding="utf-8")
+                        template = self.work / "example-template.docx"
+                        self.cli("create_docx.py", source, template)
+                        source.write_text(example, encoding="utf-8")
+                        self.cli("edit_docx.py", template, source, output, "--require-no-placeholders")
+                        expected = [rule["new"] for rule in rules]
+                    else:
+                        if "type" in spec:
+                            spec = {"blocks": [spec]}
+                        source.write_text(json.dumps(spec, ensure_ascii=False), encoding="utf-8")
+                        self.cli("create_docx.py", source, output)
+                        for block in spec["blocks"]:
+                            if "text" in block:
+                                expected.append(block["text"])
+                            expected.extend(run["text"] for run in block.get("runs", []))
+                            expected.extend(block.get("items", []))
+                            expected.extend(cell for row in block.get("rows", []) for cell in row)
+                        expected.extend(spec[key] for key in ("header", "footer") if key in spec)
+                    self.cli("office/validate.py", output, "--require-no-placeholders")
+                    extracted = self.cli("read_docx.py", output, "--include-related").stdout
+                    for text in expected:
+                        self.assertIn(text, extracted)
+                    checked_text.extend(expected)
+        self.assertIn("Project update", checked_text)
+        self.assertIn("项目进展报告", checked_text)
+        self.assertIn("项目报告 / Project report", checked_text)
+        self.assertIn("项目清单 / Project list", checked_text)
+        self.assertIn("ACME & 中文", checked_text)
+        self.assertIn("星河科技有限公司", checked_text)
+
     def test_comments_remain_structurally_valid_when_anchored(self):
         annotated = self.work / "annotated.docx"
         self.cli("comment.py", self.original, "核实费用 & 范围", "-o", annotated)

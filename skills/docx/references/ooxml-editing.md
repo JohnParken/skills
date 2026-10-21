@@ -33,7 +33,7 @@
 
 不要自动处理删除的段落标记、移动修订或格式修订；保留已有结构并报告超出支持范围。禁止仅清空文字而声称段落已被删除。
 
-使用文末修订对比命令检查遗漏的未追踪正文文字修改。将脚本路径按 skill 根目录解析，将文档放在独立工作目录；不要声称该检查覆盖全部部件、格式变更或段落合并语义。
+使用文末修订对比命令检查遗漏的未追踪正文文字修改。以读取 `SKILL.md` 的真实位置定位脚本，将文件放在宿主的下载工作目录，使用相对文件参数；不要声称该检查覆盖全部部件、格式变更或段落合并语义。
 
 保留原作者的修订内容和元数据；对其他作者的插入做删除时，在其 `w:ins` 内嵌套自己的 `w:del`。恢复其删除时，在原 `w:del` 后添加自己的 `w:ins`；不要直接重写其他作者的修订历史。
 
@@ -41,12 +41,12 @@
 
 ## 使用低层辅助工具
 
-从 skill 根目录调用脚本，将 `../docx-work/` 替换为实际的独立工作目录；修改前保留源文件，完成后执行基础检查：
+先按 [执行环境约束](../SKILL.md#执行环境约束与首步自检) 完成定位及自检，再从下载工作目录调用脚本。下文仅在已核实 skill 相对位置为 `docx` 时适用；修改前保留源文件，完成后执行基础检查，禁止为照抄示例切换目录：
 
 ```console
-python -I -S -B scripts/comment.py ../docx-work/input.docx "核对费用上限" -o ../docx-work/annotated.docx
-python -I -S -B scripts/merge_runs.py ../docx-work/input.docx -o ../docx-work/merged.docx
-python -I -S -B scripts/office/validate.py ../docx-work/edited.docx --original ../docx-work/input.docx --author Editor
+python -I -S -B docx/scripts/comment.py ./input.docx "核对费用上限" -o ./annotated.docx
+python -I -S -B docx/scripts/merge_runs.py ./input.docx -o ./merged.docx
+python -I -S -B docx/scripts/office/validate.py ./edited.docx --original ./input.docx --author Editor
 ```
 
 添加批注定义后，先补正文锚点再验收。当前基础检查仅支持有起点、终点和引用的范围批注，不支持无范围的点批注，也不验证完整线程回复语义；不要把生成批注部件声称为已验证阅读器中的显示效果。

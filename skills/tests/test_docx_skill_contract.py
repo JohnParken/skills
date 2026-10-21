@@ -43,9 +43,11 @@ class SkillContractTests(unittest.TestCase):
                     text = path.read_text()
                     self.assertNotRegex(text, r"/Users/|C:\\Users\\|https?://")
                     for target in re.findall(r"\[[^\]]+\]\(([^)]+)\)", text):
-                        self.assertFalse(Path(target).is_absolute())
-                        self.assertTrue((path.parent / target).is_file(), target)
-                        self.assertTrue((path.parent / target).resolve().is_relative_to(SKILL.resolve()))
+                        resource = target.partition("#")[0]
+                        self.assertFalse(Path(resource).is_absolute())
+                        linked_file = path.parent / resource if resource else path
+                        self.assertTrue(linked_file.is_file(), target)
+                        self.assertTrue(linked_file.resolve().is_relative_to(SKILL.resolve()))
                     if path.parent.name == "references" and len(text.splitlines()) > 100:
                         self.assertIn("目录", text)
 

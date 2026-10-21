@@ -1,6 +1,6 @@
 ---
 name: docx
-description: 仅使用 Python 标准库生成常规 DOCX 文档，完成段落、表格、图片、列表和页眉页脚设置，提供受控文字替换、纯文本读取及基础结构检查。适用于报告、信函和约定模板填充；无需安装第三方包，不提供复杂文档无损编辑、XSD 校验或页面渲染。
+description: 仅使用 Python 标准库生成 DOCX，默认采用可覆盖的公文与表格格式，支持标题、段落、图片、列表及页眉页脚，提供受控文字替换、纯文本读取和基础结构检查。适用于公文、报告、信函与模板填充；无需第三方包，不提供复杂文档无损编辑、XSD 校验或页面渲染。
 ---
 
 <!-- SKILL_DEFINITION_START -->
@@ -14,33 +14,107 @@ description: 仅使用 Python 标准库生成常规 DOCX 文档，完成段落�
 
 - 使用 Python 3.10 及以上版本，要求标准库包含 zlib，且内置 XML 解析器 Expat 版本至少为 2.6.0；解析器不满足条件时报告环境受阻。
 - 仅使用 Python 标准库；不要安装或导入第三方包，不要调用办公软件、转换器、Shell 命令、Git 或编译器。
-- 从本 skill 目录调用示例脚本，将 `python` 替换为实际兼容的解释器。使用 `-I -S -B` 禁用环境路径、site 初始化及缓存写入；脚本只添加自身所在的源码目录以加载本 skill 模块。
-- 将任务文件放在 skill 外的工作目录；下例统一使用 `../docx-work/`，按实际位置调整。不要把相对路径误解为要求在 skill 内创建输入、输出或临时文件。
+- 在宿主提供的可下载工作目录执行，使用宿主已确认可用的 Python 解释器；下文的 `python` 仅表示该入口。使用 `-I -S -B` 禁用环境路径、site 初始化及缓存写入；脚本只添加自身所在的源码目录以加载本 skill 模块。
+- 将输入、输出及任务临时文件放在当前下载工作目录，使用 `./document.json`、`./output.docx` 等相对路径。禁止将任务文件写入 skill 源码目录。
 - 按 [requirements.txt](requirements.txt) 确认无第三方运行时依赖；无需运行包安装命令。
 - 生成 DOCX；仅使用 ZIP/XML 工具读取、定点编辑和检查已有 DOTX。禁止通过改扩展名转换格式。
 
 | 任务 | 使用方式与边界 |
 |---|---|
-| 生成报告、信函 | 使用 `scripts/create_docx.py`；支持单节页面、三级标题、普通段落、简单列表、规则表格、现成 PNG/JPEG、页眉页脚和页码字段。 |
+| 生成公文、报告、信函 | 使用 `scripts/create_docx.py`；支持默认公文格式、显式样式覆盖、单节页面、四级标题、普通段落、简单列表、规则表格、现成 PNG/JPEG、页眉页脚和页码字段。 |
 | 修改文字或填充模板 | 使用 `scripts/edit_docx.py`；明确指定搜索文字、替换值和预期次数，仅修改普通文本节点。 |
 | 读取内容 | 使用 `scripts/read_docx.py`；不要将纯文本结果当作完整页面或完整 Markdown。 |
 | 基础检查 | 使用 `scripts/office/validate.py`；执行已实现的结构规则，禁止声称已通过完整 OOXML/XSD 校验。 |
 | 高级 XML 操作 | 仅在目标结构已明确时使用打包、批注和 run 辅助脚本；不要承诺任意复杂文档无损编辑。 |
 
-## 生成文档
+## 执行环境约束与首步自检
 
-先用标准库创建独立工作目录；不要为示例在 skill 内生成空目录：
+1. 保持宿主执行工具的当前工作目录不变。文件读取、写入和执行参数均使用相对路径；将任务数据限制在当前下载工作目录及其子目录，禁止用父目录路径写出该目录，禁止使用绝对路径或另选临时目录规避下载限制。脚本定位仍以真实 skill 位置为准。若当前目录是 skill 源码目录，应先由宿主明确任务工作目录，不要直接在源码目录生成文件。
+2. 以实际读取本 `SKILL.md` 时的 `file_path` 去掉末尾文件名，确定 skill 的真实位置，再依据宿主已确认的工作目录信息推导脚本相对路径。禁止照抄其他会话、示例或机器上的路径；不得用工作目录打印结果或环境变量回显猜测真实路径。若读取结果只给出掩码而无法确定可访问的相对路径，报告无法定位，不要拼接掩码执行。
+3. 将尖括号包裹的工作区、临时目录、技能根目录等掩码视为不可执行的显示文本；禁止将这些文本拼入文件参数、命令或最终回复。不要用掩码构造下载地址。
+4. 使用实际存在的 `scripts/create_docx.py`，不要调用不存在的报告脚本或假设存在虚拟环境。当前实现只需标准库，不依赖 `docx` 模块；不要照搬其他技能对系统 Python 的禁用规则，也不要安装包。首次运行必须先执行下面的自检；本节优先于生成及编辑示例。
 
-```python
-from pathlib import Path
-Path("../docx-work").mkdir(parents=True, exist_ok=True)
+下文命令仅以已核实 skill 相对位置为 `docx` 的情况为例；执行前将命令中的 `docx/` 改为实际推导并核实的相对位置。不要为了照抄命令切换工作目录；Markdown 资源链接仍以本 skill 为基准。
+
+```console
+python -I -S -B docx/scripts/create_docx.py --check
 ```
 
-将以下内容保存为 `../docx-work/document.json`：
+- 仅在返回码为 0 且输出包含 `check-ok`、`output_dir=. writable=True` 时继续。自检会检查 Python、zlib、Expat，并在当前目录实际写入、读回和清理探针文件；不生成报告。
+- 当前版本只有当前目录这一个输出候选。看到 `writable=False`、非零返回码或缺少成功标记时立即停止，报告环境异常；禁止反复重试、切换路径或退回其他挂载目录。不要依赖其他脚本的“自动选择输出目录”行为。
+- 自检只验证运行条件及当前目录写入能力，不能证明宿主一定提供下载功能；交付前还须按文末步骤验证实际生成的文件。
+- 长会话压缩后若本技能指令缺失或记忆不清，立即重新读取真实的 `SKILL.md`，恢复约束后继续；保留已确认的任务目录和文件名，不要凭记忆重建路径。
+
+## 默认公文格式与覆盖
+
+新建文档时，省略页面和样式设置即可应用以下约定。将其作为本 skill 的默认排版预设；不要据此声称符合完整公文国家标准。
+
+| 对象 | 默认格式 |
+|---|---|
+| 一级标题（`heading`，`level: 1`） | 方正小标宋简体，18pt，居中，不加粗。 |
+| 二级标题（`level: 2`） | 黑体，16pt，左对齐，不加粗。 |
+| 三级标题（`level: 3`） | 楷体，16pt，左对齐，加粗。 |
+| 四级标题（`level: 4`） | 仿宋，16pt，左对齐，不加粗。 |
+| 正文（`paragraph`） | 仿宋，16pt，左对齐，首行缩进 2 字，固定行距 28pt。 |
+| 西文 | Times New Roman。 |
+| 页面 | A4 纵向；上下边距 2.54cm，左右边距 3.18cm。 |
+
+- 使用零段前、段后间距；标题不缩进，默认使用 1.15 倍行距。为表格使用独立样式；列表、图片段落和页眉页脚沿用基础字体，避免套用正文的首行缩进和固定行距；保留列表自身的编号缩进。
+- 使用顶层 `styles.body`、`styles.heading1` 至 `styles.heading4` 覆盖整类样式；使用段落或标题的 `format` 覆盖单个块，使用 `runs` 中的字符字段覆盖局部文字。保留旧的 `align`、run `font` 和 `page.margin_mm` 用法；具体字段、优先级和示例见 [生成器输入约定](references/generation.md)。
+- 使用 `page.margin_top_mm`、`margin_bottom_mm`、`margin_left_mm`、`margin_right_mm` 单独覆盖边距，单位为毫米。不要把 2.54cm 直接写成 `2.54`；应写为 `25.4`。
+- 仅在文档中记录字体名称，不下载、安装或嵌入字体。实际显示需阅读端提供相应字体；缺失时可能发生替代，禁止声称已经验证字体或分页效果。
+- 编辑已有文档时保留原有样式；不要将文字替换操作解释为自动套用此公文格式。
+
+## 默认公文表格与覆盖
+
+按 GB/T 9704—2012《党政机关公文格式》第 5.2.2 条的通用字体字号原则，采用仿宋 16pt；将以下边框、留白、加粗、对齐及跨页行为作为本 skill 的项目排版约定。禁止将整套表格参数描述为国标逐项规定。
+
+| 对象 | 默认格式 |
+|---|---|
+| 表格正文 | 仿宋 16pt、黑色、不加粗、水平左对齐。 |
+| 表头 | 仿宋 16pt、黑色、加粗、水平居中；仅对 `header: true` 的第一行应用。 |
+| 西文与数字 | Times New Roman。 |
+| 单元格段落 | 首行缩进 0、段前段后 0、1.15 倍行距。 |
+| 单元格布局 | 垂直居中；上下留白 1mm、左右留白 1.5mm；无底色。 |
+| 边框 | 内外框均为黑色实线，0.5pt。 |
+| 表宽与行高 | 默认填满页面可用宽度；允许指定列宽；行高随内容增长。 |
+| 跨页 | 声明表头时请求重复表头；默认请求避免单行跨页拆分。 |
+
+- 使用 `styles.table_body`、`styles.table_header` 设置整份文档的表格文字样式，使用顶层 `table_format` 设置表格布局；在单张表格上使用 `body_format`、`header_format`、`format` 分别覆盖。按 [表格配置与示例](references/generation.md#表格配置与示例) 选择字段；不要将布局字段放入文字样式，也不要把正文样式覆盖解释为表格覆盖。
+- 省略 `header` 时按普通数据行处理；不要自动把第一行数据当作表头。关闭重复表头时保留已声明表头的样式。
+- 保留既有页面边距、标题和正文预设；不要因使用表格而自动切换页面或缩小字号。仅为新建文档应用表格默认值，不对已有文档自动重排。
+- 区分国标第 8 章的横排表格要求与本项目的普通表格样式。当前不支持文档内纵横分节、单双页表头朝向或相应页码布局；不要通过交换页面宽高声称满足第 8 章，也不要声称整份文档完全符合国标。
+- 将重复表头和避免拆行作为阅读器分页请求；行内容超过一页时，阅读器仍可能拆分。禁止承诺精确分页、行高或打印效果。
+
+## 中英文字符与 JSON 语法（生成和替换前必读）
+
+**允许文档内容使用中文、英文或中英混排；必须使用英文半角字符书写 JSON 语法。禁止把“JSON 引号错误”解释为“不支持中文”。**
+
+| 字符用途 | 必须遵守 | 禁止或避免 |
+|---|---|---|
+| 包围键和字符串值的引号 | 使用英文半角双引号 `"`。 | 不要使用中文弯引号 `“”`、全角双引号 `＂` 或单引号 `'` 充当 JSON 分隔符。 |
+| 结构标点和空白 | 使用半角 `:`、`,`、`{}`、`[]`；在字符串外使用普通空格、制表符或换行。 | 不要使用全角冒号 `：`、逗号 `，`、括号 `｛｝［］` 或全角空格代替语法字符。 |
+| 字段名与枚举值 | 保留 `blocks`、`text`、`type`、`paragraph` 等约定拼写和大小写。 | 不要翻译成中文字段名，也不要改成全角英文字母；JSON 可解析不代表生成器接受这些字段。 |
+| 布尔值与数值 | 在 JSON 中使用不带引号的 `true`、`false` 和半角数字、小数点，如 `1`、`12.5`。 | 不要使用 `True`、`False`、`真`、全角数字或字符串 `"true"` 代替相应类型。 |
+| 文本内容 | 保留中文、英文、中文标点及 `“”`、`‘’`；手写 JSON 时将内容中的英文双引号写成 `\"`，反斜杠写成 `\\`。 | 不要全局替换正文中的中文标点或引号，也不要把合法中文内容删掉来规避解析错误。 |
+| 模板匹配文本 | 让 `old` 与模板原文完全一致，包括中英文引号、全半角字符和空格。 | 不要自动统一标点或空格后再匹配，以免匹配不到或改错内容。 |
+
+- 将输入保存为 UTF-8（无 BOM）；不要依赖编辑器自动将英文引号转换为弯引号，不要复制 Markdown 代码块边界进 JSON 文件。
+- 优先用 Python 字典构造数据，再调用 `json.dumps(spec, ensure_ascii=False, indent=2)` 序列化；让序列化器处理引号与反斜杠转义。Python 字典中的布尔值写 `True`、`False`，序列化结果才是 JSON 的 `true`、`false`；不要把 Python 字典的字符串表示直接当成 JSON。
+- 使用 `ensure_ascii=False` 保持中文直接可读；不要声称它能修复非法 JSON。不要对已经序列化的 JSON 再次序列化，以免顶层对象变成字符串。
+- 在生成或替换前确认输入可被标准库 JSON 解析器解析；出现 `JSONDecodeError` 时按行号、列号检查错误位置及其前面的分隔符，不要在缺少原始输入时断定是中文内容导致。
+
+按 [中文 JSON 与引号示例](references/generation.md#中文-json-与引号) 核对正反例及自动序列化用法；保留下文的英文和中文示例，按任务选择。
+
+## 生成文档
+
+完成首步自检后，任选下面的英文或中文示例，将其中一个 JSON 以 UTF-8 编码保存为当前下载工作目录中的 `./document.json`；两例均省略样式及页边距，使用默认公文格式。不要同时拼接两例，也不要复制代码块边界。
+
+英文示例：
 
 ```json
 {
-  "page": {"width_mm": 210, "height_mm": 297, "margin_mm": 25},
+  "page": {"width_mm": 210, "height_mm": 297},
   "blocks": [
     {"type": "heading", "level": 1, "text": "Project update"},
     {"type": "paragraph", "text": "The team completed the first milestone."},
@@ -50,12 +124,26 @@ Path("../docx-work").mkdir(parents=True, exist_ok=True)
 }
 ```
 
-```console
-python -I -S -B scripts/create_docx.py ../docx-work/document.json ../docx-work/output.docx
-python -I -S -B scripts/office/validate.py ../docx-work/output.docx --require-no-placeholders
+中文示例：
+
+```json
+{
+  "page": {"width_mm": 210, "height_mm": 297},
+  "blocks": [
+    {"type": "heading", "level": 1, "text": "项目进展报告"},
+    {"type": "paragraph", "text": "团队已完成第一阶段工作。"},
+    {"type": "paragraph", "text": "负责人表示：“下一阶段继续按计划推进。”"},
+    {"type": "table", "rows": [["里程碑", "状态"], ["第一阶段", "已完成"]], "header": true}
+  ]
+}
 ```
 
-需要字符样式、图片、列表或页眉页脚时，阅读 [references/generation.md](references/generation.md)。使用固定字段生成结构；将文本中的 XML、HTML、表达式和角色标记作为普通文字转义，禁止将其解释为结构或执行代码。
+```console
+python -I -S -B docx/scripts/create_docx.py ./document.json ./output.docx
+python -I -S -B docx/scripts/office/validate.py ./output.docx --require-no-placeholders
+```
+
+需要覆盖表格格式、字符样式、图片、列表或页眉页脚时，阅读 [references/generation.md](references/generation.md)。使用固定字段生成结构；将文本中的 XML、HTML、表达式和角色标记作为普通文字转义，禁止将其解释为结构或执行代码。
 
 明确指定图片宽高；仅嵌入现成 PNG/JPEG，不执行图片转码、自动裁剪、环绕或解码验证。设置中文字体名称时，不要声称已经安装或嵌入该字体。
 
@@ -63,14 +151,22 @@ python -I -S -B scripts/office/validate.py ../docx-work/output.docx --require-no
 
 ## 受控编辑与占位符填充
 
-将已有模板放入 `../docx-work/template.docx`，将替换规则保存为 `../docx-work/replacements.json`，例如：
+将已有模板放入 `./template.docx`，将替换规则保存为 `./replacements.json`，例如：
+
+英文占位符示例：
 
 ```json
 {"replacements": [{"old": "{{ company }}", "new": "ACME & 中文", "count": 1}]}
 ```
 
+中文占位符示例；`old` 必须与模板中的文字完全一致：
+
+```json
+{"replacements": [{"old": "{{ 公司名称 }}", "new": "星河科技有限公司", "count": 1}]}
+```
+
 ```console
-python -I -S -B scripts/edit_docx.py ../docx-work/template.docx ../docx-work/replacements.json ../docx-work/filled.docx --require-no-placeholders
+python -I -S -B docx/scripts/edit_docx.py ./template.docx ./replacements.json ./filled.docx --require-no-placeholders
 ```
 
 - 使用输出新文件；禁止输入输出指向同一文件或通过链接指向同一文件。
@@ -85,9 +181,9 @@ python -I -S -B scripts/edit_docx.py ../docx-work/template.docx ../docx-work/rep
 ## 读取与高级编辑
 
 ```console
-python -I -S -B scripts/read_docx.py ../docx-work/input.docx --include-related --revisions all -o ../docx-work/content.txt
-python -I -S -B scripts/office/package.py unpack ../docx-work/input.docx ../docx-work/unpacked
-python -I -S -B scripts/office/package.py pack ../docx-work/unpacked ../docx-work/edited.docx
+python -I -S -B docx/scripts/read_docx.py ./input.docx --include-related --revisions all -o ./content.txt
+python -I -S -B docx/scripts/office/package.py unpack ./input.docx ./unpacked
+python -I -S -B docx/scripts/office/package.py pack ./unpacked ./edited.docx
 ```
 
 按正文顺序读取段落、超链接文字、制表符、换行和嵌套表格；表格列以制表符分隔。使用 `--include-related` 在正文后追加带标签的页眉、页脚、脚注、尾注和批注；不要将追加顺序当作页面顺序。
@@ -102,23 +198,41 @@ python -I -S -B scripts/office/package.py pack ../docx-work/unpacked ../docx-wor
 
 ## 基础结构检查与验收
 
+生成后先验证本次指定的目标文件真实存在且非空，再执行结构检查；禁止仅凭生成函数返回、打印的路径或其他会话留下的文件交付。使用标准库完成与文件列表核对等价的验证，不调用 Shell 的文件列表命令：
+
+```python
+from pathlib import Path
+import zipfile
+
+output = Path("./output.docx")  # 与本次生成目标保持一致。
+if not output.is_file() or output.stat().st_size <= 0:
+    raise RuntimeError("目标文件不存在或为空")
+with zipfile.ZipFile(output) as package:
+    if package.testzip() is not None:
+        raise RuntimeError("DOCX ZIP 完整性检查失败")
+print(f"./{output.as_posix()} exists=True size={output.stat().st_size} zip-ok")
+```
+
+禁止用其他目录中的同名文件代替该目标；验证失败时停止交付，报告实际失败。以上步骤不替代下列结构检查：
+
 ```console
-python -I -S -B scripts/office/validate.py ../docx-work/output.docx --require-no-placeholders
-python -I -S -B scripts/read_docx.py ../docx-work/output.docx --include-related -o ../docx-work/checked-content.txt
+python -I -S -B docx/scripts/office/validate.py ./output.docx --require-no-placeholders
+python -I -S -B docx/scripts/read_docx.py ./output.docx --include-related -o ./checked-content.txt
 ```
 
 1. 核对 ZIP 完整性与必需部件；解包脚本会读取成员并检查 CRC、路径和重复名称。单独使用 `zipfile.testzip()` 时确认返回 `None`。
 2. 运行基础检查并根据非零退出码修复问题。检查 XML 可解析性、必需根节点、内容类型覆盖、内部关系目标与引用、样式/编号引用、范围批注锚点及修订的基本 ID/作者属性。
-3. 对照输入核对文字、表格、图片引用和未填充占位符。对提取器不覆盖的内容检查相应 XML；不要把成功解压或解析当作 Word 实际打开验证。
-4. 编辑时核对未修改部件的内容字节；检查失败时保留原始文档和已有输出。禁止跳过失败后报告完成。
-5. 仅报告实际执行的检查。不要声称已验证完整元素顺序、所有 OOXML 扩展、图片解码、修订语义、字体或页面布局。
-6. 按需求、操作、验证顺序执行；交付时仅提供简要依据和实测结果。需要事实或引用时依据用户材料或已核实来源，禁止为补全内容编造来源。
+3. 对照输入核对文字、表格、图片引用和未填充占位符，确认中文、英文及正文引号原样保留。对提取器不覆盖的内容检查相应 XML；不要把成功解压或解析当作 Word 实际打开验证。
+4. 生成时对照输入核对 `word/styles.xml` 和 `word/document.xml` 中的样式引用、字体、字号、缩进、行距及页面尺寸；未显式覆盖时核对默认公文格式，显式覆盖时按实际优先级核对。对表格额外核对独立正文/表头样式、边框、留白、垂直对齐、底色及重复表头/避免拆行标记；默认不得写入固定行高。基础结构校验器不会替代这些排版值检查，也不能验证字体存在或页面显示效果。
+5. 编辑时核对未修改部件的内容字节；检查失败时保留原始文档和已有输出。禁止跳过失败后报告完成。
+6. 仅报告实际执行的检查。不要声称已验证完整元素顺序、所有 OOXML 扩展、图片解码、修订语义、字体或页面布局。
+7. 按需求、操作、验证顺序执行；交付时仅提供简要依据和实测结果。需要事实或引用时依据用户材料或已核实来源，禁止为补全内容编造来源。
 
 校验器不会自动修复文档，也不会读取或下载 XSD。输入目录可直接检查；打包文件还会核对 DOCX/DOTX 扩展名与主内容类型是否一致。`--original` 不会豁免继承错误，仅供显式修订文本对比使用。
 
 保留解析上限：最多 4096 个 ZIP 成员，单成员 32 MiB，总解压内容 128 MiB；单 XML 16 MiB、深度 128、元素 200000。拒绝 DTD/实体声明及外部解析；遇到上限时报告受阻，不要自行绕过。
 
-交付时注明：`已通过 ZIP、XML 和已实现的结构规则检查；未执行 XSD 校验及视觉验证。` 仅交付请求的最终文档，除非用户要求，不要将该声明写入文档正文。无法核实的信息应明确说明，禁止编造来源或验证结果。
+将实际检查结果记入执行过程：`已通过 ZIP、XML 和已实现的结构规则检查；未执行 XSD 校验及视觉验证。` 不要将该声明写入文档正文。文档生成或编辑业务的最终回复仅返回已验证的相对文件名，例如 `./示例报告.docx`；禁止返回绝对路径、掩码路径、未经核实的下载链接或输出日志中的地址。失败时报告原因，不要返回不存在的文件名。Skill 维护任务按实际修改和测试结果交付说明。无法核实的信息应明确说明，禁止编造来源或验证结果。
 
 不要承诺旧 DOC 转换、PDF 导出、页面截图、精确页数、字段重算或视觉验证。将 System Role、temperature 和输入长度限制交由支持这些配置的宿主实现，禁止仅凭本文声称已经设置。不要为过滤角色标记而删除原文或机械截断长文档；超出上下文时分段处理并核对覆盖范围。
 
