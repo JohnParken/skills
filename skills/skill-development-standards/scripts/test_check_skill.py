@@ -1,6 +1,7 @@
 """Focused tests for the read-only skill checker."""
 import contextlib
 import io
+import json
 import os
 from pathlib import Path
 import sys
@@ -19,15 +20,49 @@ def make_skill(root: Path, body: str = "Instructions.\n", front: str | None = No
     path = root / "sample-skill"
     path.mkdir()
     if front is None:
-        front = f"---\nname: sample-skill\ndescription: {DESCRIPTION}\n---\n"
+        front = f"---\nname: sample-skill\nversion: '1.0.0'\ndescription: {DESCRIPTION}\n---\n"
     (path / "SKILL.md").write_text(front + body, encoding="utf-8")
     return path
 
 
 class CheckSkillTests(unittest.TestCase):
+    def test_version_required_type_length_and_characters(self):
+        cases = [
+            (None, "required-frontmatter"),
+            ("null", "required-frontmatter"),
+            ("42", "required-frontmatter"),
+            ("true", "required-frontmatter"),
+            ('""', "required-frontmatter"),
+            ('"   "', "required-frontmatter"),
+            ('[one]', "required-frontmatter"),
+            (json.dumps("a" * 101), "version-length"),
+            (json.dumps("版本1"), "version-characters"),
+            (json.dumps("v1\nnext"), "version-characters"),
+            (json.dumps("v1\x7f"), "version-characters"),
+        ]
+        for scalar, rule in cases:
+            with self.subTest(scalar=scalar), tempfile.TemporaryDirectory() as tmp:
+                version_line = "" if scalar is None else f"version: {scalar}\n"
+                front = f"---\nname: sample-skill\ndescription: {DESCRIPTION}\n{version_line}---\n"
+                skill = make_skill(Path(tmp), front=front)
+                issues = check_skill.check_skill(skill)
+                self.assertTrue(any(issue.rule == rule and issue.level == "error" for issue in issues))
+                for options in ([], ["--strict"]):
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        self.assertEqual(1, check_skill.main([str(skill), *options]))
+
+    def test_valid_version_boundaries_and_decoded_length(self):
+        for value in ("v", "1.0.0-rc.1+build", "release 1", "a" * 100):
+            with self.subTest(value=value), tempfile.TemporaryDirectory() as tmp:
+                # Escapes count as decoded characters, not source bytes.
+                scalar = '"' + "".join(f"\\u{ord(char):04x}" for char in value) + '"'
+                front = f"---\nname: sample-skill\ndescription: {DESCRIPTION}\nversion: {scalar}\n---\n"
+                skill = make_skill(Path(tmp), front=front)
+                self.assertEqual([], check_skill.check_skill(skill))
+
     def test_clean_skill_and_python_dependency_metadata(self):
         with tempfile.TemporaryDirectory() as tmp:
-            skill = make_skill(Path(tmp), "See [guide](references/guide.md).\n", "---\nname: 'sample-skill'\ndescription: \"" + DESCRIPTION + "\"\ndependency:\n  python:\n    - requests\n---\n")
+            skill = make_skill(Path(tmp), "See [guide](references/guide.md).\n", "---\nname: 'sample-skill'\nversion: '1.0.0'\ndescription: \"" + DESCRIPTION + "\"\ndependency:\n  python:\n    - requests\n---\n")
             (skill / "requirements.txt").write_text("requests\n", encoding="utf-8")
             (skill / "scripts").mkdir()
             (skill / "scripts" / "ok.py").write_text("x = 1\n", encoding="utf-8")
@@ -49,7 +84,7 @@ class CheckSkillTests(unittest.TestCase):
 
     def test_warnings_and_strict_cli_exit_codes_and_readonly(self):
         with tempfile.TemporaryDirectory() as tmp:
-            skill = make_skill(Path(tmp), "Short body.\n", f"---\nname: sample-skill\ndescription: short\n---\n")
+            skill = make_skill(Path(tmp), "Short body.\n", f"---\nname: sample-skill\nversion: '1.0.0'\ndescription: short\n---\n")
             before = {p.relative_to(skill): (p.stat().st_mtime_ns, p.stat().st_size) for p in skill.rglob("*")}
             out = io.StringIO()
             with contextlib.redirect_stdout(out):
@@ -65,16 +100,16 @@ class CheckSkillTests(unittest.TestCase):
 
     def test_manual_review_warning_for_complex_yaml(self):
         with tempfile.TemporaryDirectory() as tmp:
-            skill = make_skill(Path(tmp), front=f"---\nname: sample-skill\ndescription: {DESCRIPTION}\ntags: [one, two]\n---\n")
+            skill = make_skill(Path(tmp), front=f"---\nname: sample-skill\nversion: '1.0.0'\ndescription: {DESCRIPTION}\ntags: [one, two]\n---\n")
             self.assertIn("yaml-manual-review", {i.rule for i in check_skill.check_skill(skill)})
 
     def test_required_scalar_types_duplicates_and_bad_quotes_fail(self):
         invalid_fronts = [
-            f"---\nname: 42\ndescription: {DESCRIPTION}\n---\n",
-            f"---\nname: sample-skill\nname: other\ndescription: {DESCRIPTION}\n---\n",
-            f"---\nname: 'sample-skill\ndescription: {DESCRIPTION}\n---\n",
-            f"---\nname: sample-skill\ndescription: {DESCRIPTION}\ndependency: requests\n---\n",
-            f"---\nname: sample-skill\ndescription: {DESCRIPTION}\ndependency:\n  python:\n    - ''\n---\n",
+            f"---\nname: 42\nversion: '1.0.0'\ndescription: {DESCRIPTION}\n---\n",
+            f"---\nname: sample-skill\nversion: '1.0.0'\nname: other\ndescription: {DESCRIPTION}\n---\n",
+            f"---\nname: 'sample-skill\nversion: '1.0.0'\ndescription: {DESCRIPTION}\n---\n",
+            f"---\nname: sample-skill\nversion: '1.0.0'\ndescription: {DESCRIPTION}\ndependency: requests\n---\n",
+            f"---\nname: sample-skill\nversion: '1.0.0'\ndescription: {DESCRIPTION}\ndependency:\n  python:\n    - ''\n---\n",
         ]
         for front in invalid_fronts:
             with self.subTest(front=front), tempfile.TemporaryDirectory() as tmp:
@@ -88,7 +123,7 @@ class CheckSkillTests(unittest.TestCase):
             refs.mkdir()
             guide = refs / "guide with spaces.md"
             guide.write_text("# Valid Anchor\n\n[bad](missing.md)\n[bad anchor](#nope)\n[]()\n", encoding="utf-8")
-            (skill / "SKILL.md").write_text(f"---\nname: sample-skill\ndescription: {DESCRIPTION}\n---\n", encoding="utf-8")
+            (skill / "SKILL.md").write_text(f"---\nname: sample-skill\nversion: '1.0.0'\ndescription: {DESCRIPTION}\n---\n", encoding="utf-8")
             (refs / "empty.md").touch()
             (refs / "dir1").mkdir()
             (skill / "scripts2").mkdir()
@@ -170,13 +205,13 @@ class CheckSkillTests(unittest.TestCase):
     def test_scalar_comments_escaping_and_dependency_duplicates(self):
         with tempfile.TemporaryDirectory() as tmp:
             skill = make_skill(Path(tmp), front=(
-                "---\nname: 'sample-skill' # comment\n"
+                "---\nname: 'sample-skill' # comment\nversion: '1.0.0'\n"
                 f"description: \"{DESCRIPTION}\" # comment\n"
                 "label: 'a ''quoted'' label'\n"
                 'note: "a: b # literal"\n---\n'
             ))
             self.assertEqual([], check_skill.check_skill(skill))
-            base = f"---\nname: sample-skill\ndescription: {DESCRIPTION}\n"
+            base = f"---\nname: sample-skill\nversion: '1.0.0'\ndescription: {DESCRIPTION}\n"
             invalid = [
                 'note: "unescaped "quote""\n',
                 "dependency:\n  python:\n    - [nested]\n",
@@ -191,7 +226,7 @@ class CheckSkillTests(unittest.TestCase):
     def test_empty_manifest_wrong_resource_type_and_exact_delimiters(self):
         with tempfile.TemporaryDirectory() as tmp:
             skill = make_skill(Path(tmp), front=(
-                f"---\nname: sample-skill\ndescription: {DESCRIPTION}\n"
+                f"---\nname: sample-skill\nversion: '1.0.0'\ndescription: {DESCRIPTION}\n"
                 'note: "--- is part of a scalar"\n---\n'
             ))
             self.assertEqual([], check_skill.check_skill(skill))
@@ -220,7 +255,7 @@ class CheckSkillTests(unittest.TestCase):
             (refs / "a#b.md").write_text("# Title\n")
             self.assertEqual([], check_skill.check_skill(skill))
             (skill / "SKILL.md").write_text(
-                f"---\nname: sample-skill\ndescription: {DESCRIPTION}\n---\n"
+                f"---\nname: sample-skill\nversion: '1.0.0'\ndescription: {DESCRIPTION}\n---\n"
                 "[bad](http://[broken)\n"
             )
             self.assertIn("broken-link", {i.rule for i in check_skill.check_skill(skill)})

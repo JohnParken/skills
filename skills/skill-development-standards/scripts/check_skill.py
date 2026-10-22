@@ -141,9 +141,15 @@ def _frontmatter(text: str, rel: str, issues: list[Issue]) -> tuple[dict[str, ob
         i += 1
     if not supported:
         issues.append(Issue("warning", "yaml-manual-review", rel, "Frontmatter uses YAML syntax this checker does not parse; review manually."))
-    for key in ("name", "description"):
+    for key in ("name", "description", "version"):
         if key in invalid_fields or not isinstance(fields.get(key), str) or not fields[key].strip():
             issues.append(Issue("error", "required-frontmatter", rel, f"Required nonempty string field '{key}' is missing or not a supported string."))
+    version = fields.get("version")
+    if isinstance(version, str) and "version" not in invalid_fields:
+        if len(version) > 100:
+            issues.append(Issue("error", "version-length", rel, "Version must not exceed 100 characters."))
+        if any(not 32 <= ord(char) <= 126 for char in version):
+            issues.append(Issue("error", "version-characters", rel, "Version must contain only printable ASCII characters."))
     desc = fields.get("description")
     if isinstance(desc, str) and not 100 <= len(desc) <= 150:
         issues.append(Issue("warning", "description-length", rel, f"Description is {len(desc)} characters; recommended length is 100–150."))
