@@ -5,6 +5,7 @@ JSON: {"replacements": [{"old": "{{name}}", "new": "Ada", "count": 1}]}
 """
 
 import argparse
+from bisect import bisect_left, bisect_right
 import json
 import re
 import sys
@@ -58,6 +59,129 @@ def _eligible(node):
                 return False
         parent = parent.parentNode
     return True
+
+
+def _diagnostic_text_sequences(paragraph):
+    """Return contiguous plain-text nodes, keeping complex containers separate."""
+    sequences = []
+    current = []
+
+    def flush():
+        nonlocal current
+        if current:
+            sequences.append(current)
+            current = []
+
+    def nested_text_nodes(container):
+        found = []
+        pending = list(reversed(container.childNodes))
+        while pending:
+            node = pending.pop()
+            if node.nodeType != node.ELEMENT_NODE:
+                continue
+            if node.namespaceURI == W and node.localName == "p":
+                continue
+            if node.namespaceURI == W and node.localName == "t":
+                found.append(node)
+            else:
+                pending.extend(reversed(node.childNodes))
+        return found
+
+    def visit(node):
+        if node.nodeType != node.ELEMENT_NODE:
+            if node.nodeType in (node.TEXT_NODE, node.CDATA_SECTION_NODE):
+                if node.data.strip():
+                    flush()
+            else:
+                flush()
+            return
+        if node.namespaceURI == W and node.localName in ("p", "r"):
+            for child in node.childNodes:
+                visit(child)
+            return
+        if node.namespaceURI == W and node.localName in ("pPr", "rPr"):
+            return
+        if node.namespaceURI == W and node.localName == "t":
+            current.append(node)
+            return
+        flush()
+        protected_nodes = nested_text_nodes(node)
+        if protected_nodes:
+            sequences.append(protected_nodes)
+
+    for child in paragraph.childNodes:
+        visit(child)
+    flush()
+    return sequences
+
+
+def _count_mismatch_evidence(documents, blocked_by_part, operations, indexes):
+    """Find split or protected occurrences in the already parsed part DOMs."""
+    evidence = {index: {"protected": False, "split": False} for index in indexes}
+    if not indexes:
+        return evidence
+    for part, dom in documents.items():
+        blocked_nodes = blocked_by_part[part]
+        for paragraph in dom.getElementsByTagNameNS(W, "p"):
+            for sequence in _diagnostic_text_sequences(paragraph):
+                pieces = []
+                starts = []
+                ends = []
+                offset = 0
+                for node in sequence:
+                    text = _text(node)
+                    if not text:
+                        continue
+                    starts.append(offset)
+                    offset += len(text)
+                    ends.append(offset)
+                    pieces.append((node, text))
+                if len(pieces) < 2:
+                    continue
+                paragraph_text = "".join(text for _, text in pieces)
+                for index in indexes:
+                    if evidence[index]["protected"] and evidence[index]["split"]:
+                        continue
+                    old = operations[index]["old"]
+                    for match in re.finditer("(?=" + re.escape(old) + ")", paragraph_text):
+                        start, end = match.start(), match.start() + len(old)
+                        first = bisect_right(ends, start)
+                        last = bisect_left(starts, end) - 1
+                        if first >= last:
+                            continue
+                        participants = [node for node, _ in pieces[first:last + 1]]
+                        if all(
+                            node not in blocked_nodes and _eligible(node)
+                            for node in participants
+                        ):
+                            evidence[index]["split"] = True
+                        else:
+                            evidence[index]["protected"] = True
+                        if evidence[index]["protected"] and evidence[index]["split"]:
+                            break
+    return evidence
+
+
+def _count_mismatch_message(operation, expected, found, evidence):
+    if found > expected:
+        detail = "Too many ordinary eligible occurrences were found."
+    elif evidence["protected"] and evidence["split"]:
+        detail = (
+            "The search text occurs in protected or complex content and is split across "
+            "text/run nodes within a paragraph."
+        )
+    elif evidence["protected"]:
+        detail = "The search text occurs in protected or complex content."
+    elif evidence["split"]:
+        detail = "The search text is split across text/run nodes within a paragraph."
+    elif found == 0:
+        detail = "The search text is absent from the selected parts."
+    else:
+        detail = "The ordinary eligible occurrence count is lower than requested."
+    return (
+        f"Expected {expected} supported occurrence(s) of {operation['old']!r}, found {found}; "
+        f"{detail} cross-run, field, revision and complex-container edits are unsupported"
+    )
 
 
 def _range_text_nodes(dom):
@@ -191,8 +315,10 @@ def replace_text(source, destination, specification, *, parts=None, require_no_p
         reject_signed_package(validator.files, (kind for relationships in validator.relations.values()
                                                for kind, _ in relationships.values()))
         counts = [0] * len(operations)
+        protected_matches = [False] * len(operations)
         changes = []
         documents = {}
+        blocked_by_part = {}
         for part in parts:
             path = unpacked / part
             if not path.is_file():
@@ -200,8 +326,14 @@ def replace_text(source, destination, specification, *, parts=None, require_no_p
             dom = parse_dom(read_xml(path))
             documents[part] = dom
             blocked_nodes = _range_text_nodes(dom)
+            blocked_by_part[part] = blocked_nodes
             for node in dom.getElementsByTagNameNS(W, "t"):
-                if node in blocked_nodes or not _eligible(node):
+                eligible = node not in blocked_nodes and _eligible(node)
+                if not eligible:
+                    original = _text(node)
+                    for index, operation in enumerate(operations):
+                        if operation["old"] in original:
+                            protected_matches[index] = True
                     continue
                 original = _text(node)
                 matches = []
@@ -222,13 +354,21 @@ def replace_text(source, destination, specification, *, parts=None, require_no_p
                     if not _preserves_space(node) and original != original.strip(XML_SPACE):
                         raise ValueError("Unpreserved edge XML whitespace is ambiguous; editing is unsupported")
                     changes.append((part, node, updated))
-        for operation, count in zip(operations, counts):
+        mismatch = next((
+            index for index, (operation, count) in enumerate(zip(operations, counts))
+            if count != operation.get("count", 1)
+        ), None)
+        if mismatch is not None:
+            index = mismatch
+            operation, count = operations[index], counts[index]
             expected = operation.get("count", 1)
-            if count != expected:
-                raise ValueError(
-                    f"Expected {expected} supported occurrence(s) of {operation['old']!r}, found {count}; "
-                    "cross-run, field, revision and complex-container edits are unsupported"
-                )
+            evidence = {"protected": False, "split": False}
+            if count < expected:
+                evidence = _count_mismatch_evidence(
+                    documents, blocked_by_part, operations, [index],
+                )[index]
+            evidence["protected"] = evidence["protected"] or protected_matches[index]
+            raise ValueError(_count_mismatch_message(operation, expected, count, evidence))
         modified = set()
         for part, node, value in changes:
             for child in list(node.childNodes):

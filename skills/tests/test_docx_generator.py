@@ -2,6 +2,7 @@
 
 import json
 import os
+import stat
 import struct
 import subprocess
 import sys
@@ -10,6 +11,7 @@ import unittest
 import zipfile
 import zlib
 from pathlib import Path
+from unittest import mock
 from xml.etree import ElementTree as ET
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -134,7 +136,7 @@ class DocxGeneratorTests(unittest.TestCase):
             )
             run_props = formatted_run.find(q(W, "rPr"))
             self.assertEqual([node.tag.rsplit("}", 1)[-1] for node in run_props],
-                             ["rFonts", "b", "i", "color", "sz", "szCs", "u"])
+                             ["rFonts", "i", "color", "sz", "szCs", "u"])
             self.assertEqual(run_props.find(q(W, "rFonts")).get(q(W, "ascii")), "Arial")
             self.assertEqual(run_props.find(q(W, "rFonts")).get(q(W, "hAnsi")), "Arial")
             self.assertEqual(run_props.find(q(W, "rFonts")).get(q(W, "eastAsia")), "Arial")
@@ -284,8 +286,87 @@ class DocxGeneratorTests(unittest.TestCase):
                           for p in paragraphs],
                          ["Heading1", "Heading2", "Heading3", "Heading4", "BodyText"])
         body_direct_ppr = paragraphs[-1].find(q(W, "pPr"))
-        self.assertEqual(body_direct_ppr.find(q(W, "spacing")).get(q(W, "line")), "560")
-        self.assertEqual(body_direct_ppr.find(q(W, "ind")).get(q(W, "firstLineChars")), "200")
+        self.assertEqual([node.tag for node in body_direct_ppr], [q(W, "pStyle")])
+        for paragraph in paragraphs:
+            self.assertIsNone(paragraph.find(f"./{q(W, 'r')}/{q(W, 'rPr')}"))
+            self.assertIsNone(paragraph.find(f"./{q(W, 'pPr')}/{q(W, 'spacing')}"))
+            self.assertIsNone(paragraph.find(f"./{q(W, 'pPr')}/{q(W, 'ind')}"))
+
+    def test_global_styles_leave_only_explicit_local_overrides_in_document(self):
+        output = self.work / "inherited.docx"
+        create_docx.create_document({
+            "styles": {
+                "body": {"font_east_asia": "楷体", "size_pt": 15, "bold": True},
+                "heading3": {"font_latin": "Calibri", "size_pt": 20},
+            },
+            "blocks": [
+                {"type": "paragraph", "runs": [{"text": "继承"},
+                 {"text": "局部", "bold": False, "font_east_asia": "宋体"}]},
+                {"type": "heading", "level": 3, "text": "标题", "format": {"align": "right"}},
+                {"type": "paragraph", "text": "等值覆盖", "format": {"size_pt": 15}},
+            ],
+        }, output)
+        document = xml_part(output, "word/document.xml")
+        paragraphs = document.findall(f"./{q(W, 'body')}/{q(W, 'p')}")
+        runs = paragraphs[0].findall(q(W, "r"))
+        self.assertIsNone(runs[0].find(q(W, "rPr")))
+        local = runs[1].find(q(W, "rPr"))
+        self.assertEqual(local.find(q(W, "b")).get(q(W, "val")), "0")
+        self.assertEqual(local.find(q(W, "rFonts")).attrib, {q(W, "eastAsia"): "宋体"})
+        self.assertIsNone(local.find(q(W, "sz")))
+        self.assertEqual(paragraphs[1].find(f"./{q(W, 'pPr')}/{q(W, 'jc')}").get(q(W, "val")), "right")
+        self.assertIsNone(paragraphs[1].find(f"./{q(W, 'r')}/{q(W, 'rPr')}"))
+        self.assertEqual(paragraphs[2].find(f".//{q(W, 'sz')}").get(q(W, "val")), "30")
+        styles = xml_part(output, "word/styles.xml")
+        self.assertEqual(style_by_id(styles, "BodyText").find(f".//{q(W, 'sz')}").get(q(W, "val")), "30")
+        self.assertEqual(style_by_id(styles, "Heading3").find(f".//{q(W, 'sz')}").get(q(W, "val")), "40")
+
+    @unittest.skipUnless(os.name == "posix", "POSIX file mode semantics")
+    def test_generation_uses_umask_for_new_files_and_preserves_existing_modes(self):
+        spec = self.work / "mode.json"
+        spec.write_text('{"blocks": []}', encoding="utf-8")
+        for mask, expected in ((0o022, 0o644), (0o077, 0o600)):
+            with self.subTest(umask=oct(mask)):
+                output = self.work / f"mode-{mask}.docx"
+                result = subprocess.run([str(PYTHON), "-I", "-S", "-B", str(SCRIPT),
+                                         str(spec), str(output)], env=self.env, cwd=self.work,
+                                        umask=mask, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(stat.S_IMODE(output.stat().st_mode), expected)
+        for mode in (0o640, 0o600):
+            output.chmod(mode)
+            create_docx.create_document({"blocks": []}, output)
+            self.assertEqual(stat.S_IMODE(output.stat().st_mode), mode)
+
+    def test_permission_failure_preserves_output_and_cleans_staging_file(self):
+        output = self.work / "preserved.docx"
+        output.write_bytes(b"keep existing output")
+        before = set(self.work.iterdir())
+        with mock.patch.object(create_docx.os, "chmod", side_effect=OSError("permission failure")):
+            with self.assertRaises(OSError):
+                create_docx.create_document({"blocks": []}, output)
+        self.assertEqual(output.read_bytes(), b"keep existing output")
+        self.assertEqual(set(self.work.iterdir()), before)
+
+    def test_image_diagnostics_use_field_location_and_preserve_alt_text(self):
+        image = self.work / "invalid.png"
+        image.write_bytes(b"not image data")
+        output = self.work / "image.docx"
+        for path, alt, expected in (("invalid.png", "示意图", r"blocks\[0\]\.path"),
+                                    (123, "", r"blocks\[0\]\.path"),
+                                    ("invalid.png", None, r"blocks\[0\]\.alt")):
+            with self.subTest(path=path, alt=alt):
+                with self.assertRaisesRegex(ValueError, expected):
+                    create_docx.create_document({"blocks": [{"type": "image", "path": path,
+                        "width_mm": 10, "height_mm": 10, "alt": alt}]}, output, self.work)
+        image.write_bytes(tiny_png())
+        for alt in ("", "示意图 & 中文"):
+            create_docx.create_document({"blocks": [{"type": "image", "path": image.name,
+                "width_mm": 10, "height_mm": 10, "alt": alt}]}, output, self.work)
+            document = xml_part(output, "word/document.xml")
+            for local_name in ("docPr", "cNvPr"):
+                node = next(node for node in document.iter() if node.tag.endswith("}" + local_name))
+                self.assertEqual(node.get("descr"), alt)
 
     def test_default_margins_drive_table_width_and_other_paragraphs_keep_normal_inheritance(self):
         output = self.work / "paragraph-inheritance.docx"
@@ -327,7 +408,9 @@ class DocxGeneratorTests(unittest.TestCase):
         table_paragraph = document.find(f".//{q(W, 'tc')}/{q(W, 'p')}")
         self.assertEqual(table_paragraph.find(f"./{q(W, 'pPr')}/{q(W, 'pStyle')}").get(q(W, "val")),
                          "TableBody")
-        self.assertEqual(table_paragraph.find(f"./{q(W, 'pPr')}/{q(W, 'spacing')}").get(q(W, "lineRule")),
+        self.assertIsNone(table_paragraph.find(f"./{q(W, 'pPr')}/{q(W, 'spacing')}"))
+        table_style = style_by_id(xml_part(output, "word/styles.xml"), "TableBody")
+        self.assertEqual(table_style.find(f"./{q(W, 'pPr')}/{q(W, 'spacing')}").get(q(W, "lineRule")),
                          "auto")
 
         header = xml_part(output, "word/header1.xml")
@@ -572,7 +655,9 @@ class DocxGeneratorTests(unittest.TestCase):
         header_p = rows[0].find(f"./{q(W, 'tc')}/{q(W, 'p')}")
         header_ppr = header_p.find(q(W, "pPr"))
         self.assertEqual(header_ppr.find(q(W, "pStyle")).get(q(W, "val")), "TableHeader")
-        self.assertEqual(header_ppr.find(q(W, "jc")).get(q(W, "val")), "center")
+        self.assertIsNone(header_ppr.find(q(W, "jc")))
+        header_style = style_by_id(xml_part(output, "word/styles.xml"), "TableHeader")
+        self.assertEqual(header_style.find(f"./{q(W, 'pPr')}/{q(W, 'jc')}").get(q(W, "val")), "center")
         self.assertEqual(header_ppr.find(q(W, "spacing")).get(q(W, "line")), "360")
         self.assertEqual(header_ppr.find(q(W, "spacing")).get(q(W, "lineRule")), "exact")
         header_rpr = header_p.find(f"./{q(W, 'r')}/{q(W, 'rPr')}")
@@ -642,7 +727,7 @@ class DocxGeneratorTests(unittest.TestCase):
             {"styles": {"table_body": {"line_spacing_pt": 20, "line_spacing_multiple": 1.5}}, "blocks": []},
             {"styles": {"table_header": {"font_east_asia": None}}, "blocks": []},
             {"styles": {"table_body": {"size_pt": None}}, "blocks": []},
-            {"blocks": [{"type": "paragraph", "text": "x", "format": {"color": "123456"}}]},
+            {"blocks": [{"type": "paragraph", "text": "x", "format": {"color": "#123456"}}]},
             {"blocks": [{**table_block, "format": None}]},
             {"blocks": [{**table_block, "format": {"border_style": "none", "border_width_pt": 0}}]},
             {"table_format": {"border_color": "nothex"},
@@ -681,18 +766,24 @@ class DocxGeneratorTests(unittest.TestCase):
         body_paragraph = custom_doc.find(f"./{q(W, 'body')}/{q(W, 'p')}")
         self.assertEqual(body_paragraph.find(f"./{q(W, 'pPr')}/{q(W, 'pStyle')}").get(q(W, "val")), "BodyText")
         ordinary_rpr = body_paragraph.find(f"./{q(W, 'r')}/{q(W, 'rPr')}")
-        self.assertIsNone(ordinary_rpr.find(q(W, "color")))
+        self.assertIsNone(ordinary_rpr)
         self.assertEqual(custom_doc.find(f".//{q(W, 'tblPr')}/{q(W, 'shd')}").get(q(W, "fill")), "ABCDEF")
         custom_cell_p = custom_doc.find(f".//{q(W, 'tc')}/{q(W, 'p')}")
         self.assertEqual(custom_cell_p.find(f"./{q(W, 'pPr')}/{q(W, 'pStyle')}").get(q(W, "val")), "TableBody")
         custom_rpr = custom_cell_p.find(f"./{q(W, 'r')}/{q(W, 'rPr')}")
-        self.assertEqual(custom_rpr.find(q(W, "rFonts")).get(q(W, "eastAsia")), "自定义表格字体")
+        self.assertIsNone(custom_rpr.find(q(W, "rFonts")).get(q(W, "eastAsia")))
+        self.assertEqual(custom_rpr.find(q(W, "rFonts")).get(q(W, "ascii")), "Table Latin")
+        custom_style = style_by_id(xml_part(custom, "word/styles.xml"), "TableBody")
+        self.assertEqual(custom_style.find(f"./{q(W, 'rPr')}/{q(W, 'rFonts')}").get(q(W, "eastAsia")),
+                         "自定义表格字体")
         self.assertEqual(custom_rpr.find(q(W, "color")).get(q(W, "val")), "112233")
         default_doc = xml_part(default, "word/document.xml")
         self.assertIsNone(default_doc.find(f".//{q(W, 'tblPr')}/{q(W, 'shd')}"))
         default_rpr = default_doc.find(f".//{q(W, 'tc')}/{q(W, 'p')}/{q(W, 'r')}/{q(W, 'rPr')}")
-        self.assertEqual(default_rpr.find(q(W, "rFonts")).get(q(W, "eastAsia")), "仿宋")
-        self.assertEqual(default_rpr.find(q(W, "color")).get(q(W, "val")), "000000")
+        self.assertIsNone(default_rpr)
+        default_style = style_by_id(xml_part(default, "word/styles.xml"), "TableBody")
+        self.assertEqual(default_style.find(f"./{q(W, 'rPr')}/{q(W, 'rFonts')}").get(q(W, "eastAsia")), "仿宋")
+        self.assertEqual(default_style.find(f"./{q(W, 'rPr')}/{q(W, 'color')}").get(q(W, "val")), "000000")
 
     def test_invalid_new_contract_values_preserve_existing_output(self):
         output = self.work / "preserved-new-contract.docx"

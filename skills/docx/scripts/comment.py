@@ -11,7 +11,7 @@ Usage:
 
     # Against a .docx directly (extracts, writes satellite files, rezips)
     python comment.py contract.docx "This cap is too low" -o annotated.docx
-    python comment.py contract.docx "Comment" --id 5      # explicit ID
+    python comment.py contract.docx "Comment" -o revised.docx --id 5  # explicit ID
 
 The comment ID is auto-assigned (max existing + 1) unless --id is given.
 Plain text is XML-escaped automatically; if you pass already-escaped text
@@ -336,8 +336,8 @@ def _add_comment_inplace(
     unpacked_dir: Path | str,
     text: str,
     comment_id: int | None = None,
-    author: str = "Claude",
-    initials: str = "C",
+    author: str = "Editor",
+    initials: str = "E",
     parent_id: int | None = None,
     raw: bool = False,
 ) -> tuple[int, str, str]:
@@ -423,8 +423,8 @@ def add_comment(
     unpacked_dir: Path | str,
     text: str,
     comment_id: int | None = None,
-    author: str = "Claude",
-    initials: str = "C",
+    author: str = "Editor",
+    initials: str = "E",
     parent_id: int | None = None,
     raw: bool = False,
 ) -> tuple[int, str, str]:
@@ -498,11 +498,11 @@ def main() -> None:
                    help="Treat text as pre-escaped XML (skip automatic escaping)")
     p.add_argument("--id", type=int, dest="comment_id",
                    help="Comment ID (default: auto-assign as max existing + 1)")
-    p.add_argument("--author", default="Claude", help="Author name")
-    p.add_argument("--initials", default="C", help="Author initials")
+    p.add_argument("--author", default="Editor", help="Author name")
+    p.add_argument("--initials", default="E", help="Author initials")
     p.add_argument("--parent", type=int, help="Parent comment ID (makes this a reply)")
     p.add_argument("-o", "--output",
-                   help="Output .docx path (only used when input is a .docx; default: overwrite input)")
+                   help="Required output .docx path for packaged input")
     args = p.parse_args()
 
     src = Path(args.input)
@@ -510,7 +510,7 @@ def main() -> None:
     try:
         if src.is_dir():
             if args.output:
-                print("Warning: --output ignored for directory input", file=sys.stderr)
+                raise ValueError("Directory input is modified in place and does not accept --output")
             cid, _, msg = add_comment(
                 src, args.text, comment_id=args.comment_id,
                 author=args.author, initials=args.initials,
@@ -518,7 +518,13 @@ def main() -> None:
             )
             print(msg)
         elif src.is_file() and src.suffix.lower() in (".docx", ".dotx"):
-            out = Path(args.output) if args.output else src
+            if args.output is None:
+                raise ValueError("Packaged input requires an explicit --output path")
+            out = Path(args.output)
+            same_path = out.resolve(strict=False) == src.resolve(strict=True)
+            same_file = out.exists() and os.path.samefile(src, out)
+            if same_path or same_file:
+                raise ValueError("Comment output must be distinct from input")
             if out.is_symlink() or out.suffix.lower() != src.suffix.lower():
                 raise ValueError("Comment output must have the same DOCX/DOTX extension and not be a symbolic link")
             with tempfile.TemporaryDirectory() as tmp:

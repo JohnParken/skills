@@ -138,11 +138,6 @@ def opc_target(target: str, source_part: str, target_mode: str = "") -> str | No
     return "/".join(parts)
 
 
-def rels_source_part(rels_file: Path, unpacked_dir: Path) -> str:
-    owner_dir = rels_file.parent.parent.relative_to(unpacked_dir)
-    return posixpath.join(owner_dir.as_posix(), rels_file.name[: -len(".rels")]).lstrip("./")
-
-
 def part_text(data: bytes) -> str:
     return data.decode("utf-8", "surrogateescape")
 
@@ -200,6 +195,8 @@ def safe_extract(zf: zipfile.ZipFile, dest: Path) -> None:
 
 
 def rezip(src_dir: Path, out_path: Path) -> None:
+    if out_path.is_symlink():
+        raise ValueError("Symbolic link pack destinations are unsupported")
     if src_dir.is_symlink() or not src_dir.is_dir():
         raise ValueError("Pack source must be a directory without symbolic links")
     files, entries = [], []

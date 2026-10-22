@@ -7,10 +7,10 @@ from .advanced import validate_numbering, validate_tables
 
 try:
     from .. import xmlio
-    from ..helpers import MAX_MEMBERS, MAX_PACKAGE_BYTES, MAX_PART_BYTES, opc_target
+    from ..helpers import MAX_MEMBERS, MAX_PACKAGE_BYTES, MAX_PART_BYTES, opc_target, check_archive, read_part
 except ImportError:
     import xmlio
-    from helpers import MAX_MEMBERS, MAX_PACKAGE_BYTES, MAX_PART_BYTES, opc_target
+    from helpers import MAX_MEMBERS, MAX_PACKAGE_BYTES, MAX_PART_BYTES, opc_target, check_archive, read_part
 
 W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 R = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
@@ -38,6 +38,19 @@ class StructureValidator:
         self.files = set()
         self.relations = {}
         self.content_types = {}
+        self.archive = None
+
+    @classmethod
+    def from_archive(cls, archive, *, extension=None, require_no_placeholders=False):
+        """Validate an already preflighted open archive without extracting it.
+
+        The caller must keep the archive open until validate() finishes. Use
+        archiveio.open_archive for untrusted packed inputs, not bare ZipFile.
+        """
+        validator = cls(".", extension=extension,
+                        require_no_placeholders=require_no_placeholders)
+        validator.archive = archive
+        return validator
 
     def error(self, message):
         self.errors.append(message)
@@ -45,7 +58,7 @@ class StructureValidator:
     def warning(self, message):
         self.warnings.append(message)
 
-    def validate(self):
+    def validate(self, *, quiet=False):
         self.errors = []
         self.warnings = []
         self.roots = {}
@@ -62,13 +75,25 @@ class StructureValidator:
                 validate_numbering(self.roots, self.error, self.warning)
         except (OSError, ValueError) as exc:
             self.error(str(exc))
-        for message in self.errors:
-            print(f"FAILED - {message}")
-        for message in self.warnings:
-            print(f"WARNING - {message}")
+        if not quiet:
+            for message in self.errors:
+                print(f"FAILED - {message}")
+            for message in self.warnings:
+                print(f"WARNING - {message}")
         return not self.errors
 
     def _load(self):
+        if self.archive is not None:
+            check_archive(self.archive)
+            budget = xmlio.XmlBudget()
+            for member in self.archive.infolist():
+                if member.is_dir():
+                    continue
+                # Read every member through EOF to check CRC, including media.
+                data = read_part(self.archive, member.filename)
+                self._load_part(member.filename, data, budget)
+            self._required()
+            return
         if not self.directory.is_dir() or self.directory.is_symlink():
             raise ValueError("Input must be a directory without symbolic links")
         total = count = 0
@@ -90,6 +115,17 @@ class StructureValidator:
                     self.roots[name] = xmlio.parse(path, budget=xml_budget).getroot()
                 except ValueError as exc:
                     self.error(f"{name}: {exc}")
+        self._required()
+
+    def _load_part(self, name, data, budget):
+        self.files.add(name)
+        if name.lower().endswith((".xml", ".rels")):
+            try:
+                self.roots[name] = xmlio.fromstring(data, budget=budget)
+            except ValueError as exc:
+                self.error(f"{name}: {exc}")
+
+    def _required(self):
         for name in REQUIRED:
             if name not in self.roots:
                 self.error(f"Missing or invalid required XML part: {name}")

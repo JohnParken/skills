@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import difflib
+import hashlib
 import json
 import math
 import os
 import re
+import stat
+import struct
 import sys
 import tempfile
 import unicodedata
@@ -16,6 +20,11 @@ from pathlib import Path
 from typing import Any
 from xml.parsers import expat
 from xml.etree import ElementTree as ET
+
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from office import xmlio
 
 W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 R = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
@@ -59,6 +68,7 @@ _ALIGNMENTS = {"left", "center", "right", "justify"}
 _STYLE_FIELDS = {
     "font_east_asia", "font_latin", "size_pt", "bold", "align",
     "first_line_chars", "line_spacing_pt", "space_before_pt", "space_after_pt",
+    "line_spacing_multiple", "color",
 }
 _STYLE_DEFAULTS = {
     "body": {
@@ -87,6 +97,10 @@ _STYLE_DEFAULTS = {
         "space_before_pt": 0, "space_after_pt": 0,
     },
 }
+_STYLE_DEFAULTS.update({
+    "title": {**_STYLE_DEFAULTS["heading1"], "size_pt": 22, "space_after_pt": 12},
+    "subtitle": {**_STYLE_DEFAULTS["heading1"], "size_pt": 14, "space_after_pt": 8},
+})
 _TABLE_STYLE_DEFAULTS = {
     "table_body": {
         "font_east_asia": "仿宋", "font_latin": "Times New Roman", "size_pt": 16,
@@ -99,13 +113,13 @@ _TABLE_STYLE_DEFAULTS = {
         "line_spacing_multiple": 1.15, "space_before_pt": 0, "space_after_pt": 0,
     },
 }
-_TABLE_STYLE_FIELDS = _STYLE_FIELDS | {"color", "line_spacing_multiple"}
 _TABLE_LAYOUT_DEFAULTS = {
     "align": "left", "vertical_align": "center", "border_style": "single",
     "border_width_pt": 0.5, "border_color": "000000", "cell_fill": "none",
     "cell_margin_top_mm": 1, "cell_margin_bottom_mm": 1,
     "cell_margin_left_mm": 1.5, "cell_margin_right_mm": 1.5,
     "repeat_header": True, "allow_row_split": False,
+    "preset": "grid", "column_sizing": "equal", "band_fill": "none",
 }
 _TABLE_BORDER_EDGES = {"top", "bottom", "left", "right", "insideH", "insideV"}
 
@@ -119,7 +133,13 @@ def _object(value: Any, label: str, allowed: set[str], required: set[str] = froz
         raise ValueError(f"{label} must be an object")
     unknown = set(value) - allowed
     if unknown:
-        raise ValueError(f"{label} has unknown field(s): {', '.join(map(str, sorted(unknown, key=str)))}")
+        hints = []
+        for key in sorted(unknown, key=str):
+            matches = difflib.get_close_matches(str(key), sorted(allowed), n=1, cutoff=0.7)
+            if matches:
+                hints.append(f"{key!r}: did you mean {matches[0]!r}?")
+        suffix = " (" + "; ".join(hints) + ")" if hints else ""
+        raise ValueError(f"{label} has unknown field(s): {', '.join(map(str, sorted(unknown, key=str)))}{suffix}")
     missing = required - set(value)
     if missing:
         raise ValueError(f"{label} is missing field(s): {', '.join(sorted(missing))}")
@@ -149,6 +169,8 @@ def _single_line_text(value: Any, label: str) -> str:
 
 def _validate_style_fields(value: Any, label: str) -> dict:
     fields = _object(value, label, _STYLE_FIELDS)
+    if "line_spacing_pt" in fields and "line_spacing_multiple" in fields:
+        raise ValueError(f"{label} cannot set both line_spacing_pt and line_spacing_multiple")
     result: dict[str, Any] = {}
     for key, field_value in fields.items():
         field_label = f"{label}.{key}"
@@ -168,6 +190,13 @@ def _validate_style_fields(value: Any, label: str) -> dict:
             result[key] = _number(field_value, field_label, 0, 20, allow_zero=True)
         elif key == "line_spacing_pt":
             result[key] = _number(field_value, field_label, 1, 400)
+        elif key == "line_spacing_multiple":
+            result[key] = _number(field_value, field_label, 0.5, 10)
+        elif key == "color":
+            color = _text(field_value, field_label, allow_empty=False)
+            if not _COLOR_RE.fullmatch(color):
+                raise ValueError(f"{field_label} must be six hexadecimal RGB characters without #")
+            result[key] = color.upper()
         elif key in ("space_before_pt", "space_after_pt"):
             result[key] = _number(field_value, field_label, 0, 400, allow_zero=True)
     return result
@@ -184,22 +213,7 @@ def _merge_table_text_format(base: dict, layer: dict) -> dict:
 
 
 def _validate_table_text_fields(value: Any, label: str) -> dict:
-    fields = _object(value, label, _TABLE_STYLE_FIELDS)
-    if "line_spacing_pt" in fields and "line_spacing_multiple" in fields:
-        raise ValueError(f"{label} cannot set both line_spacing_pt and line_spacing_multiple")
-    result: dict[str, Any] = {}
-    for key, field_value in fields.items():
-        field_label = f"{label}.{key}"
-        if key in _STYLE_FIELDS:
-            result.update(_validate_style_fields({key: field_value}, label))
-        elif key == "color":
-            color = _text(field_value, field_label, allow_empty=False)
-            if not _COLOR_RE.fullmatch(color):
-                raise ValueError(f"{field_label} must be six hexadecimal RGB characters without #")
-            result[key] = color.upper()
-        elif key == "line_spacing_multiple":
-            result[key] = _number(field_value, field_label, 0.5, 10)
-    return result
+    return _validate_style_fields(value, label)
 
 
 def _validate_table_layout(value: Any, label: str) -> dict:
@@ -209,6 +223,11 @@ def _validate_table_layout(value: Any, label: str) -> dict:
         field_label = f"{label}.{key}"
         if key == "borders":
             result[key] = _validate_borders(field_value, field_label)
+        elif key in {"preset", "column_sizing"}:
+            choices = {"grid", "three_line", "zebra"} if key == "preset" else {"equal", "content"}
+            if not isinstance(field_value, str) or field_value not in choices:
+                raise ValueError(f"{field_label} must be one of {', '.join(sorted(choices))}")
+            result[key] = field_value
         elif key == "align":
             if not isinstance(field_value, str) or field_value not in {"left", "center", "right"}:
                 raise ValueError(f"{field_label} must be left, center, or right")
@@ -223,9 +242,9 @@ def _validate_table_layout(value: Any, label: str) -> dict:
             result[key] = field_value
         elif key == "border_width_pt":
             result[key] = _number(field_value, field_label, 0.25, 12)
-        elif key in {"border_color", "cell_fill"}:
+        elif key in {"border_color", "cell_fill", "band_fill"}:
             text = _text(field_value, field_label, allow_empty=False)
-            if key == "cell_fill" and text == "none":
+            if key != "border_color" and text == "none":
                 result[key] = text
             elif _COLOR_RE.fullmatch(text):
                 result[key] = text.upper()
@@ -239,6 +258,21 @@ def _validate_table_layout(value: Any, label: str) -> dict:
             if not isinstance(field_value, bool):
                 raise ValueError(f"{field_label} must be a boolean")
             result[key] = field_value
+    if "preset" in result:
+        preset = result["preset"]
+        defaults = {"border_style": "single" if preset == "grid" else "none",
+                    "band_fill": "F2F4F7" if preset == "zebra" else "none",
+                    "borders": {edge: {"style": "single" if preset == "grid" else "none", "width_pt": 0.5}
+                                for edge in _TABLE_BORDER_EDGES}}
+        if preset == "three_line":
+            for edge in ("top", "bottom"):
+                defaults["borders"][edge] = {"style": "single", "width_pt": 1.5}
+        for fields in defaults["borders"].values():
+            if "border_style" in result:
+                fields["style"] = result["border_style"]
+            if "border_width_pt" in result:
+                fields["width_pt"] = result["border_width_pt"]
+        result = _merge_table_layout(defaults, result)
     return result
 
 
@@ -330,19 +364,39 @@ def _cell_borders(rows: list, layout: dict, label: str) -> None:
         cell.setdefault("borders", {})[edge] = border
 
 
-def _validated_styles(value: Any) -> dict[str, dict]:
+def _theme_base_format(theme: str) -> dict:
+    """Share non-official theme typography across body and related parts."""
+    return {"font_east_asia": "微软雅黑" if theme == "business" else "宋体",
+            "font_latin": "Calibri" if theme == "business" else "Times New Roman",
+            "size_pt": 10.5, "line_spacing_multiple": 1.25}
+
+
+def _validated_styles(value: Any, theme: str = "official") -> dict[str, dict]:
     if value is None:
         raise ValueError("styles must be an object")
     entries = _object(value, "styles", set(_STYLE_DEFAULTS) | set(_TABLE_STYLE_DEFAULTS))
     result = {name: defaults.copy() for name, defaults in _STYLE_DEFAULTS.items()}
     result.update({name: defaults.copy() for name, defaults in _TABLE_STYLE_DEFAULTS.items()})
+    if theme != "official":
+        for name, defaults in result.items():
+            defaults.pop("line_spacing_pt", None)
+            defaults.update({**_theme_base_format(theme), "space_after_pt": 4, "first_line_chars": 0})
+            if name in {"title", "subtitle"} or name.startswith("heading"):
+                defaults.update({"font_east_asia": "黑体", "bold": True,
+                                 "size_pt": {"title": 22, "subtitle": 12, "heading1": 16,
+                                             "heading2": 14, "heading3": 12, "heading4": 11}[name],
+                                 "color": "1A365D" if theme == "business" else "000000"})
+                defaults["align"] = "center" if name in {"title", "subtitle"} else "left"
+            elif name == "body" and theme == "academic":
+                defaults["first_line_chars"] = 2
     for name, fields in entries.items():
         if name in _TABLE_STYLE_DEFAULTS:
             result[name] = _merge_table_text_format(
                 result[name], _validate_table_text_fields(fields, f"styles.{name}"),
             )
         else:
-            result[name].update(_validate_style_fields(fields, f"styles.{name}"))
+            result[name] = _merge_table_text_format(
+                result[name], _validate_style_fields(fields, f"styles.{name}"))
     return result
 
 
@@ -363,7 +417,7 @@ def _text(value: Any, label: str, *, allow_empty: bool = True) -> str:
         raise ValueError(f"{label} must be a string")
     if not allow_empty and not value:
         raise ValueError(f"{label} must not be empty")
-    for char in value:
+    for index, char in enumerate(value):
         point = ord(char)
         if unicodedata.category(char) == "Cc" or not (
             point in (0x9, 0xA, 0xD)
@@ -371,8 +425,34 @@ def _text(value: Any, label: str, *, allow_empty: bool = True) -> str:
             or 0xE000 <= point <= 0xFFFD
             or 0x10000 <= point <= 0x10FFFF
         ):
-            raise ValueError(f"{label} contains an unsupported control or XML character")
+            hint = "; split multiline content into paragraph blocks" if char in "\t\r\n" else ""
+            raise ValueError(f"{label} contains an unsupported control or XML character "
+                             f"U+{point:04X} at character {index + 1}{hint}")
     return value
+
+
+def _content_widths(rows: list, total: int, padding: int, label: str) -> list[int]:
+    """Estimate widths without font metrics; keep a usable minimum per column."""
+    columns = len(rows[0])
+    minimum = padding + _twips(8)
+    if columns * minimum > total:
+        raise ValueError(f"{label}: content column sizing needs fewer columns or smaller cell margins")
+    weights = []
+    for column in range(columns):
+        longest = 1
+        for row in rows:
+            cell = row[column]
+            text = cell if isinstance(cell, str) else cell.get("text", "") if isinstance(cell, dict) else ""
+            if isinstance(text, str):
+                longest = max(longest, sum(2 if unicodedata.east_asian_width(char) in {"W", "F"}
+                                           else 1 for char in text))
+        weights.append(math.sqrt(longest))
+    remaining = total - minimum * columns
+    weight_total = sum(weights)
+    widths = [minimum + int(remaining * weight / weight_total) for weight in weights]
+    for index in range(total - sum(widths)):
+        widths[index % columns] += 1
+    return widths
 
 
 def _twips(mm: float) -> int:
@@ -383,29 +463,127 @@ def _emu(mm: float) -> int:
     return int(mm * 36000.0 + 0.5)
 
 
-def _image(path_value: Any, width: float, height: float, base_dir: Path, label: str) -> dict:
+def _image_size(data: bytes, label: str) -> tuple[int, int]:
+    """Read PNG IHDR or JPEG SOF dimensions without decoding image pixels."""
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        if len(data) >= 33 and data[8:16] == b"\x00\x00\x00\rIHDR":
+            if zlib.crc32(data[12:29]) & 0xFFFFFFFF == int.from_bytes(data[29:33], "big"):
+                width, height = struct.unpack(">II", data[16:24])
+                if width and height:
+                    return width, height
+    elif data.startswith(b"\xff\xd8"):
+        cursor = 2
+        while cursor + 4 <= len(data):
+            if data[cursor] != 0xFF:
+                break
+            while cursor < len(data) and data[cursor] == 0xFF:
+                cursor += 1
+            if cursor >= len(data):
+                break
+            marker = data[cursor]
+            cursor += 1
+            if marker in {0xD9, 0xDA, 0x00}:
+                break
+            if marker == 0x01 or 0xD0 <= marker <= 0xD7:
+                continue
+            length = int.from_bytes(data[cursor:cursor + 2], "big")
+            if length < 2 or cursor + length > len(data):
+                break
+            if marker in {0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF} and length >= 8:
+                height, width = struct.unpack(">HH", data[cursor + 3:cursor + 7])
+                if width and height:
+                    return width, height
+            cursor += length
+    raise ValueError(f"{label}: cannot infer image ratio from a valid PNG/JPEG dimension header; provide both dimensions")
+
+
+class ImageResources:
+    """One operation's immutable image bytes; never cache across documents."""
+
+    def __init__(self, deduplicate: bool):
+        self.paths = {}
+        self.payloads = {}
+        self.loaded_bytes = 0
+        self.packaged_bytes = 0
+        self.packaged_digests = set()
+        self.deduplicate = deduplicate
+
+    def load(self, path: Path, label: str) -> dict:
+        if path not in self.paths:
+            if not stat.S_ISREG(path.stat().st_mode):
+                raise ValueError(f"{label}.path must reference a regular image file")
+            with path.open("rb") as image_file:
+                info = os.fstat(image_file.fileno())
+                if not stat.S_ISREG(info.st_mode):
+                    raise ValueError(f"{label}.path must reference a regular image file")
+                if info.st_size > _MAX_IMAGE_BYTES:
+                    raise ValueError(f"{label}.path exceeds the 32 MiB image limit")
+                if self.loaded_bytes + info.st_size > _MAX_PACKAGE_BYTES:
+                    raise ValueError(f"{label}.path exceeds the 128 MiB image resource budget")
+                # Bound by the observed file size, not a 32 MiB allocation for
+                # every tiny image. Reject growth/truncation during this read.
+                data = image_file.read(info.st_size + 1)
+                if len(data) != info.st_size:
+                    raise ValueError(f"{label}.path changed size while reading")
+            if data.startswith(b"\x89PNG\r\n\x1a\n") and data.endswith(b"\x00\x00\x00\x00IEND\xaeB\x60\x82"):
+                extension = "png"
+            elif data.startswith(b"\xff\xd8") and b"\xff\xd9" in data[2:]:
+                extension = "jpg"
+            else:
+                raise ValueError(f"{label}.path must reference an existing PNG or JPEG image")
+            digest = hashlib.sha256(data).digest()
+            resource = self.payloads.get(digest)
+            if resource is None:
+                resource = {"data": data, "extension": extension, "digest": digest}
+                self.payloads[digest] = resource
+                self.loaded_bytes += len(data)
+            self.paths[path] = resource
+        resource = self.paths[path]
+        if not self.deduplicate or resource["digest"] not in self.packaged_digests:
+            self.packaged_bytes += len(resource["data"])
+            if self.packaged_bytes > _MAX_PACKAGE_BYTES:
+                raise ValueError(f"{label}.path exceeds the 128 MiB package image budget")
+            self.packaged_digests.add(resource["digest"])
+        return resource
+
+
+def _image(path_value: Any, width: float | None, height: float | None, base_dir: Path,
+           alt: Any, label: str, resources: ImageResources) -> dict:
+    alt_text = _text(alt, f"{label}.alt")
     rel_path = _text(path_value, f"{label}.path", allow_empty=False)
     path = Path(rel_path)
     if not path.is_absolute():
         path = base_dir / path
     path = path.resolve()
-    if path.stat().st_size > _MAX_IMAGE_BYTES:
-        raise ValueError(f"{label}.path exceeds the 32 MiB image limit")
-    with path.open("rb") as image_file:
-        data = image_file.read(_MAX_IMAGE_BYTES + 1)
-    if len(data) > _MAX_IMAGE_BYTES:
-        raise ValueError(f"{label}.path exceeds the 32 MiB image limit")
-    if data.startswith(b"\x89PNG\r\n\x1a\n") and data.endswith(b"\x00\x00\x00\x00IEND\xaeB\x60\x82"):
-        extension = "png"
-    elif data.startswith(b"\xff\xd8") and b"\xff\xd9" in data[2:]:
-        extension = "jpg"
-    else:
-        raise ValueError(f"{label}.path must reference an existing PNG or JPEG image")
+    resource = resources.load(path, label)
+    if width is None or height is None:
+        if "dimensions" not in resource:
+            resource["dimensions"] = _image_size(resource["data"], label)
+        pixels_wide, pixels_high = resource["dimensions"]
+        if width is None:
+            width = height * pixels_wide / pixels_high
+        else:
+            height = width * pixels_high / pixels_wide
     return {
-        "type": "image", "image_path": path, "image_data": data,
-        "extension": extension, "cx": _emu(width), "cy": _emu(height),
-        "alt": _text(label, "image alt"),
+        "type": "image", "image_path": path, "image_data": resource["data"],
+        "image_digest": resource["digest"],
+        "extension": resource["extension"], "cx": _emu(width), "cy": _emu(height),
+        "alt": alt_text,
     }
+
+
+def _prepare_image(fields: dict, base_dir: Path, label: str, max_width: int, max_height: int,
+                   resources: ImageResources) -> dict:
+    if "width_mm" not in fields and "height_mm" not in fields:
+        raise ValueError(f"{label} requires width_mm and/or height_mm")
+    width = _number(fields["width_mm"], f"{label}.width_mm", 0.1, _MAX_PAGE_MM) if "width_mm" in fields else None
+    height = _number(fields["height_mm"], f"{label}.height_mm", 0.1, _MAX_PAGE_MM) if "height_mm" in fields else None
+    if width is not None and _emu(width) > max_width or height is not None and _emu(height) > max_height:
+        raise ValueError(f"{label} dimensions exceed the cell width/page content area")
+    image = _image(fields["path"], width, height, base_dir, fields["alt"], label, resources)
+    if image["cx"] > max_width or image["cy"] > max_height or min(image["cx"], image["cy"]) < _emu(0.1):
+        raise ValueError(f"{label} dimensions exceed the cell width/page content area or are too small")
+    return image
 
 
 def _validate_run(value: Any, label: str) -> dict:
@@ -434,7 +612,7 @@ def _validate_run(value: Any, label: str) -> dict:
 
 def _validate_spec(spec: Any, base_dir: Path) -> dict:
     source = _object(spec, "spec", {
-        "page", "styles", "table_format", "header", "footer", "page_numbers", "blocks",
+        "page", "styles", "table_format", "header", "footer", "page_numbers", "blocks", "theme", "deduplicate_images",
     }, {"blocks"})
     page = _object(source.get("page", {}), "page", {
         "width_mm", "height_mm", "margin_mm", "margin_top_mm", "margin_bottom_mm",
@@ -461,10 +639,10 @@ def _validate_spec(spec: Any, base_dir: Path) -> dict:
     available_height = page_twips["height"] - page_twips["top"] - page_twips["bottom"]
     if available_width <= 0 or available_height <= 0:
         raise ValueError("page margins must leave positive width and height for content after rounding")
-    styles = _validated_styles(source["styles"]) if "styles" in source else {
-        **{name: defaults.copy() for name, defaults in _STYLE_DEFAULTS.items()},
-        **{name: defaults.copy() for name, defaults in _TABLE_STYLE_DEFAULTS.items()},
-    }
+    theme = source.get("theme", "official")
+    if not isinstance(theme, str) or theme not in {"official", "business", "academic"}:
+        raise ValueError("theme must be official, business, or academic")
+    styles = _validated_styles(source.get("styles", {}), theme)
     table_layout = _merge_table_layout(
         _TABLE_LAYOUT_DEFAULTS,
         _validate_table_layout(source["table_format"], "table_format") if "table_format" in source else {},
@@ -475,6 +653,10 @@ def _validate_spec(spec: Any, base_dir: Path) -> dict:
     page_numbers = source.get("page_numbers", False)
     if not isinstance(page_numbers, bool):
         raise ValueError("page_numbers must be a boolean")
+    deduplicate_images = source.get("deduplicate_images", False)
+    if not isinstance(deduplicate_images, bool):
+        raise ValueError("deduplicate_images must be a boolean")
+    resources = ImageResources(deduplicate_images)
 
     blocks_value = source["blocks"]
     if not isinstance(blocks_value, list):
@@ -489,7 +671,13 @@ def _validate_spec(spec: Any, base_dir: Path) -> dict:
         kind = value.get("type")
         if not isinstance(kind, str):
             raise ValueError(f"{label}.type must be a string")
-        if kind == "heading":
+        if kind in {"title", "subtitle"}:
+            block = _object(value, label, {"type", "text", "format", "align"}, {"type", "text"})
+            formatting = _validate_style_fields(block.get("format", {}), f"{label}.format")
+            if "align" in block:
+                formatting.update(_validate_style_fields({"align": block["align"]}, f"{label}.format"))
+            blocks.append({"type": kind, "text": _text(block["text"], f"{label}.text"), "format": formatting})
+        elif kind == "heading":
             block = _object(value, label, {"type", "text", "level", "format", "align"},
                             {"type", "text", "level"})
             level = block["level"]
@@ -582,8 +770,6 @@ def _validate_spec(spec: Any, base_dir: Path) -> dict:
             header_overrides = _validate_table_text_fields(block["header_format"], f"{label}.header_format") \
                 if "header_format" in block else {}
             resolved_layout = _merge_table_layout(table_layout, layout_overrides)
-            resolved_body = _merge_table_text_format(styles["table_body"], body_overrides)
-            resolved_header = _merge_table_text_format(styles["table_header"], header_overrides)
             if "widths_mm" in block:
                 widths = block["widths_mm"]
                 if not isinstance(widths, list) or len(widths) != columns:
@@ -593,8 +779,12 @@ def _validate_spec(spec: Any, base_dir: Path) -> dict:
                 if sum(widths_twips) > available_width:
                     raise ValueError(f"{label}.widths_mm exceeds the page content width")
             else:
-                quotient, remainder = divmod(available_width, columns)
-                widths_twips = [quotient + (1 if i < remainder else 0) for i in range(columns)]
+                if resolved_layout["column_sizing"] == "content":
+                    padding = _twips(resolved_layout["cell_margin_left_mm"]) + _twips(resolved_layout["cell_margin_right_mm"])
+                    widths_twips = _content_widths(rows, available_width, padding, label)
+                else:
+                    quotient, remainder = divmod(available_width, columns)
+                    widths_twips = [quotient + (1 if i < remainder else 0) for i in range(columns)]
             horizontal_padding = _twips(resolved_layout["cell_margin_left_mm"]) \
                 + _twips(resolved_layout["cell_margin_right_mm"])
             if any(width - horizontal_padding <= 0 for width in widths_twips):
@@ -621,30 +811,33 @@ def _validate_spec(spec: Any, base_dir: Path) -> dict:
                         image_label = f"{cell_label}.image"
                         image_fields = _object(fields["image"], image_label,
                                                {"path", "width_mm", "height_mm", "alt"},
-                                               {"path", "width_mm", "height_mm", "alt"})
-                        image_width = _number(image_fields["width_mm"], f"{image_label}.width_mm", 0.1, _MAX_PAGE_MM)
-                        image_height = _number(image_fields["height_mm"], f"{image_label}.height_mm", 0.1, _MAX_PAGE_MM)
-                        if (_emu(image_width) > (widths_twips[column] - horizontal_padding) * 635
-                                or _emu(image_height) > (available_height - vertical_padding) * 635):
-                            raise ValueError(f"{image_label} dimensions exceed the cell width/page content height")
-                        alt = _text(image_fields["alt"], f"{image_label}.alt")
-                        image = _image(image_fields["path"], image_width, image_height, base_dir, alt)
+                                               {"path", "alt"})
+                        image = _prepare_image(image_fields, base_dir, image_label,
+                                               (widths_twips[column] - horizontal_padding) * 635,
+                                               (available_height - vertical_padding) * 635, resources)
                         image_paths.append(image["image_path"])
                         normalized["image"] = image
                     parsed.append(normalized)
                 parsed_rows.append(parsed)
             _cell_borders(parsed_rows, resolved_layout, label)
+            if resolved_layout["preset"] == "three_line" and 0 < header_rows < len(parsed_rows):
+                for column in range(columns):
+                    for row_index, edge in ((header_rows - 1, "bottom"), (header_rows, "top")):
+                        cell = parsed_rows[row_index][column]
+                        if isinstance(cell, str):
+                            cell = {"text": cell, "image": None}
+                            parsed_rows[row_index][column] = cell
+                        cell.setdefault("borders", {}).setdefault(edge, {
+                            "style": "single", "width_pt": 0.75, "color": resolved_layout["border_color"],
+                        })
             blocks.append({"type": kind, "rows": parsed_rows, "widths_twips": widths_twips,
                            "header": header_rows > 0, "header_rows": header_rows, "format": resolved_layout,
-                           "body_format": resolved_body, "header_format": resolved_header})
+                           "body_format": body_overrides, "header_format": header_overrides})
         elif kind == "image":
             block = _object(value, label, {"type", "path", "width_mm", "height_mm", "alt"},
-                            {"type", "path", "width_mm", "height_mm", "alt"})
-            image_width = _number(block["width_mm"], f"{label}.width_mm", 0.1, _MAX_PAGE_MM)
-            image_height = _number(block["height_mm"], f"{label}.height_mm", 0.1, _MAX_PAGE_MM)
-            if _twips(image_width) > available_width or _twips(image_height) > available_height:
-                raise ValueError(f"{label} dimensions exceed the page content area")
-            image = _image(block["path"], image_width, image_height, base_dir, block["alt"])
+                            {"type", "path", "alt"})
+            image = _prepare_image(block, base_dir, label, available_width * 635, available_height * 635,
+                                   resources)
             image_paths.append(image["image_path"])
             blocks.append(image)
         elif kind == "page_break":
@@ -658,6 +851,15 @@ def _validate_spec(spec: Any, base_dir: Path) -> dict:
         "blocks": blocks,
         "header": header, "footer": footer,
         "page_numbers": page_numbers, "image_paths": image_paths,
+        "deduplicate_images": deduplicate_images,
+        "list_format": None if theme == "official" else {
+            **_theme_base_format(theme), "bold": False, "color": "000000", "align": "left",
+            "space_before_pt": 0, "space_after_pt": 4,
+        },
+        "related_format": None if theme == "official" else {
+            **_theme_base_format(theme), "bold": False, "color": "000000", "align": "left",
+            "first_line_chars": 0, "space_before_pt": 0, "space_after_pt": 0,
+        },
     }
 
 
@@ -700,8 +902,10 @@ def _append_character_properties(parent: ET.Element, formatting: dict) -> None:
 def _add_text_run(parent: ET.Element, text: str, formatting: dict | None = None) -> None:
     run = ET.SubElement(parent, _q(W, "r"))
     if formatting:
-        props = ET.SubElement(run, _q(W, "rPr"))
+        props = ET.Element(_q(W, "rPr"))
         _append_character_properties(props, formatting)
+        if len(props):
+            run.append(props)
     text_element = ET.SubElement(run, _q(W, "t"))
     if text[:1].isspace() or text[-1:].isspace():
         text_element.set(_q(XML, "space"), "preserve")
@@ -765,7 +969,8 @@ def _paragraph(parent: ET.Element, *, text: str | None = None, runs: list[dict] 
     return paragraph
 
 
-def _styles_xml(style_formats: dict[str, dict]) -> bytes:
+def _styles_xml(style_formats: dict[str, dict], related_format: dict | None = None,
+                list_format: dict | None = None) -> bytes:
     styles = ET.Element(_q(W, "styles"))
     defaults = ET.SubElement(styles, _q(W, "docDefaults"))
     run_default = ET.SubElement(defaults, _q(W, "rPrDefault"))
@@ -797,6 +1002,25 @@ def _styles_xml(style_formats: dict[str, dict]) -> bytes:
     normal_rpr = ET.SubElement(normal, _q(W, "rPr"))
     _append_character_properties(normal_rpr, normal_format)
 
+    if related_format is not None:
+        for style_id in ("Header", "Footer"):
+            style = ET.SubElement(styles, _q(W, "style"), {
+                _q(W, "type"): "paragraph", _q(W, "styleId"): style_id,
+            })
+            ET.SubElement(style, _q(W, "name"), {_q(W, "val"): style_id})
+            ET.SubElement(style, _q(W, "basedOn"), {_q(W, "val"): "Normal"})
+            _append_paragraph_properties(ET.SubElement(style, _q(W, "pPr")), related_format)
+            _append_character_properties(ET.SubElement(style, _q(W, "rPr")), related_format)
+
+    if list_format is not None:
+        style = ET.SubElement(styles, _q(W, "style"), {
+            _q(W, "type"): "paragraph", _q(W, "styleId"): "ListParagraph",
+        })
+        ET.SubElement(style, _q(W, "name"), {_q(W, "val"): "List Paragraph"})
+        ET.SubElement(style, _q(W, "basedOn"), {_q(W, "val"): "Normal"})
+        _append_paragraph_properties(ET.SubElement(style, _q(W, "pPr")), list_format)
+        _append_character_properties(ET.SubElement(style, _q(W, "rPr")), list_format)
+
     body = ET.SubElement(styles, _q(W, "style"), {
         _q(W, "type"): "paragraph", _q(W, "styleId"): "BodyText",
     })
@@ -823,6 +1047,16 @@ def _styles_xml(style_formats: dict[str, dict]) -> bytes:
         _append_paragraph_properties(table_ppr, style_formats[style_key])
         table_rpr = ET.SubElement(table_style, _q(W, "rPr"))
         _append_character_properties(table_rpr, style_formats[style_key])
+
+    for key, style_id in (("title", "Title"), ("subtitle", "Subtitle")):
+        style = ET.SubElement(styles, _q(W, "style"), {
+            _q(W, "type"): "paragraph", _q(W, "styleId"): style_id,
+        })
+        ET.SubElement(style, _q(W, "name"), {_q(W, "val"): style_id})
+        ET.SubElement(style, _q(W, "basedOn"), {_q(W, "val"): "Normal"})
+        ET.SubElement(style, _q(W, "next"), {_q(W, "val"): "BodyText"})
+        _append_paragraph_properties(ET.SubElement(style, _q(W, "pPr")), style_formats[key], keep_next=True)
+        _append_character_properties(ET.SubElement(style, _q(W, "rPr")), style_formats[key])
 
     for level in range(1, 5):
         format_name = f"heading{level}"
@@ -936,6 +1170,10 @@ def _table(parent: ET.Element, block: dict, next_drawing_id: int) -> list[dict]:
                 for edge in ("top", "left", "bottom", "right"):
                     if edge in content["borders"]:
                         ET.SubElement(cell_edges, _q(W, edge), _border_attributes(content["borders"][edge]))
+            if not is_header and (row_index - block["header_rows"]) % 2 == 1 and layout["band_fill"] != "none":
+                ET.SubElement(cell_props, _q(W, "shd"), {
+                    _q(W, "val"): "clear", _q(W, "fill"): layout["band_fill"],
+                })
             ET.SubElement(cell_props, _q(W, "vAlign"), {_q(W, "val"): layout["vertical_align"]})
             style_name = "TableHeader" if is_header else "TableBody"
             text_format = block["header_format"] if is_header else block["body_format"]
@@ -984,9 +1222,10 @@ def _add_picture(parent: ET.Element, block: dict, drawing_id: int) -> None:
     ET.SubElement(geometry, _q(A, "avLst"))
 
 
-def _related_text_xml(root_name: str, text: str, *, page_numbers: bool = False) -> bytes:
+def _related_text_xml(root_name: str, text: str, *, page_numbers: bool = False,
+                      style: str | None = None) -> bytes:
     root = ET.Element(_q(W, root_name))
-    paragraph = ET.SubElement(root, _q(W, "p"))
+    paragraph = _paragraph(root, style=style)
     if text:
         _add_text_run(paragraph, text)
     if page_numbers:
@@ -1015,17 +1254,17 @@ def _document_xml(spec: dict) -> tuple[bytes, list[dict], list[dict]]:
     shared_ids = {}
     for block in spec["blocks"]:
         kind = block["type"]
-        if kind == "heading":
-            format_name = f"heading{block['level']}"
-            formatting = spec["styles"][format_name].copy()
-            formatting.update(block["format"])
+        if kind in {"title", "subtitle"}:
+            _paragraph(body, text=block["text"], style="Title" if kind == "title" else "Subtitle",
+                       formatting=block["format"])
+        elif kind == "heading":
+            formatting = block["format"].copy()
             if block["align"] is not None:
                 formatting["align"] = block["align"]
             _paragraph(body, text=block["text"], style=f"Heading{block['level']}",
-                       formatting=formatting, outline_level=block["level"] - 1, keep_next=True)
+                       formatting=formatting)
         elif kind == "paragraph":
-            formatting = spec["styles"]["body"].copy()
-            formatting.update(block["format"])
+            formatting = block["format"].copy()
             if block["align"] is not None:
                 formatting["align"] = block["align"]
             if isinstance(block["content"], str):
@@ -1043,7 +1282,8 @@ def _document_xml(spec: dict) -> tuple[bytes, list[dict], list[dict]]:
             else:
                 block["num_id"] = shared_ids[identifier]
             for item in block["items"]:
-                _paragraph(body, text=item, num_id=block["num_id"], list_level=block["level"])
+                _paragraph(body, text=item, num_id=block["num_id"], list_level=block["level"],
+                           style="ListParagraph" if spec["list_format"] is not None else None)
         elif kind == "table":
             images = _table(body, block, next_drawing_id)
             image_blocks.extend(images)
@@ -1112,11 +1352,21 @@ def _content_types_xml(extensions: set[str], overrides: list[tuple[str, str]]) -
 
 def _package_parts(spec: dict) -> dict[str, bytes]:
     relationships: list[tuple[str, str, str]] = []
+    media = {}
 
     def add_relationship(rel_type: str, target: str) -> str:
         rel_id = f"rId{len(relationships) + 1}"
         relationships.append((rel_id, _REL_TYPES[rel_type], target))
         return rel_id
+
+    def add_image(image: dict, name: str) -> None:
+        digest = image["image_digest"]
+        if spec["deduplicate_images"] and digest in media:
+            image["media_name"], image["rid"] = media[digest]
+        else:
+            image["media_name"] = name
+            image["rid"] = add_relationship("image", f"media/{name}")
+            media[digest] = (name, image["rid"])
 
     add_relationship("styles", "styles.xml")
     add_relationship("numbering", "numbering.xml")
@@ -1128,8 +1378,7 @@ def _package_parts(spec: dict) -> dict[str, bytes]:
     for index, block in enumerate(spec["blocks"], start=1):
         if block["type"] == "image":
             name = f"image{index}.{block['extension']}"
-            block["media_name"] = name
-            block["rid"] = add_relationship("image", f"media/{name}")
+            add_image(block, name)
         elif block["type"] == "table":
             for row_index, row in enumerate(block["rows"], 1):
                 for column_index, cell in enumerate(row, 1):
@@ -1137,8 +1386,7 @@ def _package_parts(spec: dict) -> dict[str, bytes]:
                         continue
                     image = cell["image"]
                     name = f"image{index}_r{row_index}_c{column_index}.{image['extension']}"
-                    image["media_name"] = name
-                    image["rid"] = add_relationship("image", f"media/{name}")
+                    add_image(image, name)
 
     document_xml, image_blocks, instances = _document_xml(spec)
     parts = {
@@ -1153,11 +1401,13 @@ def _package_parts(spec: dict) -> dict[str, bytes]:
         ]),
         "word/document.xml": document_xml,
         "word/_rels/document.xml.rels": _relationship_xml(relationships),
-        "word/styles.xml": _styles_xml(spec["styles"]),
+        "word/styles.xml": _styles_xml(spec["styles"], spec["related_format"], spec["list_format"]),
         "word/numbering.xml": _numbering_xml(instances),
     }
     if spec["header"] is not None:
-        parts["word/header1.xml"] = _related_text_xml("hdr", spec["header"])
+        parts["word/header1.xml"] = _related_text_xml(
+            "hdr", spec["header"], style="Header" if spec["related_format"] is not None else None,
+        )
         parts["[Content_Types].xml"] = _content_types_xml(
             {block["extension"] for block in image_blocks},
             [("word/document.xml", _CONTENT_TYPES["document"]),
@@ -1168,6 +1418,7 @@ def _package_parts(spec: dict) -> dict[str, bytes]:
     if spec["footer"] is not None or spec["page_numbers"]:
         parts["word/footer1.xml"] = _related_text_xml(
             "ftr", spec["footer"] or "", page_numbers=spec["page_numbers"],
+            style="Footer" if spec["related_format"] is not None else None,
         )
         overrides = [("word/document.xml", _CONTENT_TYPES["document"]),
                      ("word/styles.xml", _CONTENT_TYPES["styles"]),
@@ -1190,9 +1441,66 @@ def _package_parts(spec: dict) -> dict[str, bytes]:
     return parts
 
 
-def create_document(spec: dict, output: str | Path, base_dir: str | Path | None = None) -> Path:
+def _check_generated_budget(parts: dict[str, bytes]) -> None:
+    budget = xmlio.XmlBudget()
+    for name, data in parts.items():
+        if name.endswith((".xml", ".rels")):
+            try:
+                xmlio.fromstring(data, budget=budget)
+            except ValueError as exc:
+                raise ValueError(f"generated package {name}: {exc}") from exc
+
+
+def preflight_document(spec: dict, base_dir: str | Path | None = None) -> dict:
+    """Check the full specification and generated XML budgets without writing."""
+    validated = _validate_spec(spec, Path(base_dir) if base_dir is not None else Path.cwd())
+    parts = _package_parts(validated)
+    _check_generated_budget(parts)
+    return {"status": "preflight-ok", "blocks": len(validated["blocks"]),
+            "parts": len(parts), "uncompressed_bytes": sum(map(len, parts.values())),
+            "visual_validation": False, "xsd_validation": False}
+
+
+def _verify_content(spec: dict, roots: dict) -> None:
+    expected = []
+    images = tables = 0
+    for block in spec["blocks"]:
+        kind = block["type"]
+        if kind in {"title", "subtitle", "heading"}:
+            expected.append(block["text"])
+        elif kind == "paragraph":
+            expected.extend([block["content"]] if isinstance(block["content"], str)
+                            else [run["text"] for run in block["content"]])
+        elif kind == "list":
+            expected.extend(block["items"])
+        elif kind == "table":
+            tables += 1
+            for row in block["rows"]:
+                for cell in row:
+                    expected.append(cell if isinstance(cell, str) else cell["text"])
+                    images += int(isinstance(cell, dict) and cell["image"] is not None)
+        elif kind == "image":
+            images += 1
+    document = roots["word/document.xml"]
+    actual = [node.text or "" for node in document.iter(_q(W, "t"))]
+    if actual != expected:
+        raise ValueError("Generated body text does not match input content coverage")
+    if len(list(document.iter(_q(W, "tbl")))) != tables or len(list(document.iter(_q(W, "drawing")))) != images:
+        raise ValueError("Generated table/image counts do not match input content coverage")
+    for key, name in (("header", "word/header1.xml"), ("footer", "word/footer1.xml")):
+        if name in roots:
+            actual_text = "".join(node.text or "" for node in roots[name].iter(_q(W, "t")))
+            expected_text = (spec[key] or "") + (" 1" if key == "footer" and spec["page_numbers"] else "")
+            if actual_text != expected_text:
+                raise ValueError(f"Generated {key} text does not match input content coverage")
+
+
+def create_document(spec: dict, output: str | Path, base_dir: str | Path | None = None, *,
+                    verify: bool = False, require_no_placeholders: bool = False) -> Path:
     """Create a DOCX at output, resolving relative image paths under base_dir."""
     output_path = Path(output)
+    if not isinstance(verify, bool) or not isinstance(require_no_placeholders, bool):
+        raise ValueError("verify and require_no_placeholders must be booleans")
     if output_path.suffix.lower() != ".docx":
         raise ValueError("output path must use the .docx extension")
     image_base = Path(base_dir) if base_dir is not None else Path.cwd()
@@ -1201,6 +1509,7 @@ def create_document(spec: dict, output: str | Path, base_dir: str | Path | None 
     if resolved_output in validated["image_paths"]:
         raise ValueError("output must not overwrite an image used by the document")
     parts = _package_parts(validated)
+    _check_generated_budget(parts)
 
     parent = output_path.parent
     parent.mkdir(parents=True, exist_ok=True)
@@ -1214,6 +1523,27 @@ def create_document(spec: dict, output: str | Path, base_dir: str | Path | None 
                 raise ValueError("generated DOCX exceeds the 128 MiB package limit")
             file.flush()
             os.fsync(file.fileno())
+        if output_path.exists():
+            mode = stat.S_IMODE(output_path.stat().st_mode)
+        else:
+            umask = os.umask(0)
+            os.umask(umask)
+            mode = 0o666 & ~umask
+        os.chmod(temporary_name, mode)
+        if verify or require_no_placeholders:
+            from office.archiveio import open_archive
+            from office.validators.structure import StructureValidator
+            from office.validators.generation import verify_generation
+
+            with open_archive(Path(temporary_name)) as archive:
+                validator = StructureValidator.from_archive(
+                    archive, extension=".docx", require_no_placeholders=require_no_placeholders,
+                )
+                if not validator.validate(quiet=True) or validator.warnings:
+                    raise ValueError("Generated document failed verification: "
+                                     + "; ".join((validator.errors + validator.warnings)[:5]))
+                _verify_content(validated, validator.roots)
+                verify_generation(validated, validator)
         os.replace(temporary_name, output_path)
     except BaseException:
         try:
@@ -1226,19 +1556,26 @@ def create_document(spec: dict, output: str | Path, base_dir: str | Path | None 
 
 def _runtime_check() -> bool:
     checks_passed = True
+    version = ".".join(map(str, sys.version_info[:3]))
+    print(f"python={version} required>=3.10 supported={sys.version_info >= (3, 10)}")
     if sys.version_info < (3, 10):
         checks_passed = False
     try:
         payload = b"docx-runtime-check"
         if zlib.decompress(zlib.compress(payload)) != payload:
             checks_passed = False
+            print("zlib=failed")
+        else:
+            print("zlib=ok")
     except Exception:
         checks_passed = False
+        print("zlib=failed")
     try:
         match = re.search(r"(\d+)\.(\d+)\.(\d+)", expat.EXPAT_VERSION)
         expat_version = tuple(map(int, match.groups())) if match else (0, 0, 0)
         if expat_version < (2, 6, 0):
             checks_passed = False
+        print(f"expat={expat.EXPAT_VERSION} required>=2.6.0 supported={expat_version >= (2, 6, 0)}")
         ET.fromstring(b"<runtime-check><ok/></runtime-check>")
     except Exception:
         checks_passed = False
@@ -1259,24 +1596,49 @@ def _runtime_check() -> bool:
     return True
 
 
+def _json_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"Duplicate JSON field {key!r}; keep exactly one value")
+        result[key] = value
+    return result
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("input", type=Path, nargs="?", help="JSON document specification")
     parser.add_argument("output", type=Path, nargs="?", help="output DOCX path")
     parser.add_argument("--check", action="store_true", help="check runtime support and current-directory write access")
+    parser.add_argument("--preflight", action="store_true", help="validate input and resource budgets without writing")
+    parser.add_argument("--verify", action="store_true", help="check ZIP CRC, structure and input coverage before publishing")
+    parser.add_argument("--require-no-placeholders", action="store_true", help="also verify and reject remaining {{...}} markers")
     args = parser.parse_args(argv)
     if args.check:
-        if args.input is not None or args.output is not None:
-            parser.error("--check does not accept positional arguments")
+        if args.input is not None or args.output is not None or args.preflight or args.verify or args.require_no_placeholders:
+            parser.error("--check does not accept positional arguments or generation options")
         return 0 if _runtime_check() else 1
-    if args.input is None or args.output is None:
-        parser.error("input and output are required unless --check is used")
+    if args.preflight and (args.output is not None or args.verify or args.require_no_placeholders):
+        parser.error("--preflight accepts input only, without output or verification options")
+    if args.input is None or (args.output is None and not args.preflight):
+        parser.error("input is required; output is required unless --check or --preflight is used")
     try:
-        if args.input.resolve() == args.output.resolve():
+        if args.output is not None and args.input.resolve() == args.output.resolve():
             parser.error("output must not refer to the input JSON file")
-        spec = json.loads(args.input.read_text(encoding="utf-8"))
-        create_document(spec, args.output, base_dir=args.input.resolve().parent)
-    except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as exc:
+        spec = json.loads(args.input.read_text(encoding="utf-8"), object_pairs_hook=_json_object)
+        if args.preflight:
+            print(json.dumps(preflight_document(spec, args.input.resolve().parent), ensure_ascii=False))
+        else:
+            verified = args.verify or args.require_no_placeholders
+            create_document(spec, args.output, base_dir=args.input.resolve().parent,
+                            verify=verified, require_no_placeholders=args.require_no_placeholders)
+            if verified:
+                print(json.dumps({"status": "verified", "output": args.output.as_posix(),
+                                  "blocks": len(spec["blocks"]), "zip_crc": True,
+                                  "structure": True, "content_coverage": True,
+                                  "layout_intent": True,
+                                  "visual_validation": False, "xsd_validation": False}, ensure_ascii=False))
+    except (OSError, UnicodeError, ValueError, RuntimeError, zipfile.BadZipFile) as exc:
         parser.error(str(exc))
     return 0
 

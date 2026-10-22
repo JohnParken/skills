@@ -37,6 +37,25 @@ class DocxScopeTests(unittest.TestCase):
             cwd=self.work, env=self.env, capture_output=True, text=True,
         )
 
+    def make_modified_package(self, *, tracked=False, malformed=False):
+        modified = self.work / "modified.docx"
+        with zipfile.ZipFile(self.original) as source, zipfile.ZipFile(modified, "w") as target:
+            for entry in source.infolist():
+                data = source.read(entry.filename)
+                if entry.filename == "word/document.xml":
+                    if malformed:
+                        data = b"<not-xml"
+                    elif tracked:
+                        data = data.replace(
+                            b"</w:p>",
+                            b'<w:ins w:id="1" w:author="Reviewer" w:date="2026-01-01T00:00:00Z">'
+                            b"<w:r><w:t>Added</w:t></w:r></w:ins></w:p>", 1,
+                        )
+                    else:
+                        data = data.replace(b"The team", b"A team", 1)
+                target.writestr(entry, data)
+        return modified
+
     def test_rejects_non_word_packed_inputs_even_with_docx_original(self):
         for suffix in (".pptx", ".xlsx", ".potx", ".xltx"):
             with self.subTest(suffix=suffix):
@@ -82,6 +101,39 @@ class DocxScopeTests(unittest.TestCase):
         result = self.run_cli(unpacked, "--original", self.original)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("Basic structure checks PASSED.", result.stdout)
+
+    def test_original_alone_rejects_untracked_text(self):
+        modified = self.make_modified_package()
+        result = self.run_cli(modified, "--original", self.original)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("Document text doesn't match", result.stdout)
+
+    def test_original_alone_accepts_valid_tracked_change(self):
+        modified = self.make_modified_package(tracked=True)
+        result = self.run_cli(modified, "--original", self.original)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_author_is_compatibility_option_with_same_result(self):
+        modified = self.make_modified_package()
+        default = self.run_cli(modified, "--original", self.original)
+        compatibility = self.run_cli(
+            modified, "--original", self.original, "--author", "ignored-value"
+        )
+        self.assertEqual(default.returncode, 1, default.stdout + default.stderr)
+        self.assertEqual(compatibility.returncode, default.returncode,
+                         compatibility.stdout + compatibility.stderr)
+        self.assertIn("does not filter authors", compatibility.stdout)
+
+    def test_author_without_original_remains_cli_error(self):
+        result = self.run_cli(self.original, "--author", "Reviewer")
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("--author requires --original", result.stderr)
+
+    def test_structure_failure_still_fails_with_original(self):
+        malformed = self.make_modified_package(malformed=True)
+        result = self.run_cli(malformed, "--original", self.original)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("FAILED", result.stderr + result.stdout)
 
 
 if __name__ == "__main__":

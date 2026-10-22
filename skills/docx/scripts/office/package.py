@@ -67,6 +67,8 @@ def pack_document(source: str | Path, destination: str | Path) -> Path:
     """Repack XML and media without launching an archiver or following links."""
     source, destination = Path(source), Path(destination)
     _check_extension(destination)
+    if destination.is_symlink():
+        raise ValueError("Symbolic link pack destinations are unsupported")
     if not source.is_dir() or source.is_symlink():
         raise ValueError("Pack source must be a directory, not a symbolic link")
     if destination.resolve().is_relative_to(source.resolve()):

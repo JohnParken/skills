@@ -2,6 +2,8 @@
 
 ## 目录
 
+- [预检与集成验收](#预检与集成验收)
+- [主题与文档标题](#主题与文档标题)
 - [顶层字段](#顶层字段)
 - [默认格式与页面](#默认格式与页面)
 - [样式字段与覆盖顺序](#样式字段与覆盖顺序)
@@ -10,10 +12,52 @@
 - [显式覆盖示例](#显式覆盖示例)
 - [中文 JSON 与引号](#中文-json-与引号)
 
-先按 [执行环境约束](../SKILL.md#执行环境约束与首步自检) 定位脚本并完成自检。在宿主的下载工作目录调用生成器，输入输出使用 `./document.json`、`./output.docx` 等相对路径；不要切换到 skill 源码目录。脚本路径使用已核实的 skill 相对位置，禁止拼接掩码。相对图片路径以输入 JSON 所在目录为基准。需要 Python API 时调用 `create_document(spec, output, base_dir=None)`，同样使用相对文件参数。禁止传入未声明的字段，生成器会拒绝未知字段、错误类型和不支持的块。
+先按 [执行环境约束](../SKILL.md#执行环境约束与首步自检) 定位脚本并完成自检。在宿主的下载工作目录调用生成器，输入输出使用 `./document.json`、`./output.docx` 等相对路径；不要切换到 skill 源码目录。脚本路径使用已核实的 skill 相对位置，禁止拼接掩码。相对图片路径以输入 JSON 所在目录为基准。需要 Python API 时调用 `create_document(spec, output, base_dir=None, verify=True, require_no_placeholders=False)`，同样使用相对文件参数。禁止传入未声明的字段，生成器会拒绝未知字段、错误类型和不支持的块。
+
+## 预检与集成验收
+
+保留自检入口 `scripts/create_docx.py --check`，不要加 `docx/` 前缀。完成环境自检后，使用以下相对入口；输入输出位于任务目录：
+
+```console
+python -I -S -B scripts/create_docx.py ./document.json --preflight
+python -I -S -B scripts/create_docx.py ./document.json ./output.docx --verify --require-no-placeholders
+```
+
+`--preflight` 只接受输入路径，检查字段、图片引用、生成 XML 和共享预算，不写文档或执行写入探针；不是结构或视觉验收。以上两条为可选路径：普通生成直接用第二条，无需先重复预检。`--verify` 在临时 ZIP 写完后读取全部成员并检查 CRC、结构及正文文字序列、表格/图片数量、页眉页脚文字，再按输入核对排版意图：块顺序与分页符、标题样式与大纲、列表实例/层级/编号定义、样式及显式文字格式、页面尺寸/边距、表格行列/网格宽度/单元格内容归属/边框/留白/跨页标记、图片显示尺寸/替代文字及引用媒体的 SHA-256。通过后原子发布输出，失败保留已有输出。`--require-no-placeholders` 隐含开启验收，检查跨 run 的双花括号标记；正文需要字面花括号时省略该参数。验收遇到未验证警告同样拒绝发布。成功摘要增加 `layout_intent: true`；这是生成子集的输入与 XML 对照，不计算页码，不做 XSD、字体可用性或视觉验证。
+
+API 默认 `verify=False` 保持兼容；按本 Skill 流程生成交付时显式设为 `True`。所有生成调用在写出前检查共享 XML 预算，避免输出自身校验器拒绝的超限文件。调用 `preflight_document(spec, base_dir=None)` 获取预检摘要，返回块数、部件数和未压缩大小。使用 Python 字典可直接调用 API，无需先写 JSON。CLI 拒绝重复 JSON 键，未知字段在可确定时提示相近字段名；非法字符诊断包含字段路径、从 1 起的字符位置和 Unicode 码位，不静默清洗内容。
+
+生成失败时执行 [生成失败修正与有限重试](../SKILL.md#生成失败修正与有限重试)：由助手按诊断修正可确定的输入或调用错误，首次之外最多重试 2 次，每次重新完整验收；脚本本身仍为单次执行。安全、资源、环境或能力边界受阻时停止，不绕过校验，也不将旧输出交付为本次结果。
+
+## 主题与文档标题
+
+使用 `theme` 选择 `official`（默认）、`business` 或 `academic`；显式样式覆盖优先于主题。主题仅为项目排版预设，不代表公文或学术标准认证。编辑已有文档不应用主题。
+
+| 主题 | 正文与西文字体 | 正文排版 | 标题 |
+|---|---|---|---|
+| official | 仿宋 / Times New Roman | 保持 16pt、固定 28pt、首行 2 字 | 保持原有四级标题 |
+| business | 微软雅黑 / Calibri | 10.5pt、1.25 倍、段后 4pt、无首行缩进 | 黑体、深蓝、章节左对齐 |
+| academic | 宋体 / Times New Roman | 10.5pt、1.25 倍、段后 4pt、首行 2 字 | 黑体、黑色、章节左对齐 |
+
+主题同时设置表格正文和表头的基础字体、字号、行距；后者保留加粗及居中。字体只记录名称，不安装或嵌入。`title` 和 `subtitle` 块支持 `text`、`format`、`align`，不接受 `level`，不写大纲级别；使用 `styles.title`、`styles.subtitle` 覆盖，默认分别为 22pt 和 14pt。章节继续使用原有 heading 1–4，不改变旧输入的语义。
+
+商务和学术主题的页眉页脚使用独立的 `Header`、`Footer` 段落样式，采用对应主题基础中西文字体、10.5pt、1.25 倍行距、黑色、不加粗、左对齐、无首行缩进、段前段后 0pt。正文的 `styles.body` 覆盖不会改变这些样式；它们是内置 Word 样式，不是新增 JSON 样式字段。纯页码页脚及页码字段结果同样继承 `Footer`。公文主题保留原有基础样式：仿宋 / Times New Roman、16pt、1.15 倍行距、段前段后 0pt。省略页眉页脚且未启用页码时不生成相应部件；显式空字符串保留空部件。字体是否可用及页码实际值仍须在阅读器中核对。
+
+```json
+{"theme":"business","blocks":[
+  {"type":"title","text":"项目报告"},
+  {"type":"subtitle","text":"季度进展"},
+  {"type":"heading","level":1,"text":"一、概况"},
+  {"type":"paragraph","text":"正文内容。"}
+]}
+```
+
+商务和学术列表使用内置 `ListParagraph` 样式，基础中西文字体与主题一致，10.5pt、1.25 倍行距、段前 0pt、段后 4pt、黑色、不加粗、左对齐；不写首行缩进属性，保留编号定义的悬挂缩进。正文覆盖不影响列表。公文列表仍使用原有基础样式，`ordered`、`list_id` 与 `level` 的语义不变；不增加列表样式输入字段。
 
 ## 顶层字段
 
+- 使用可选 `theme` 选择命名主题；使用可选布尔值 `deduplicate_images` 复用相同图片字节，默认 `false`。
+- 每次生成或预检独立缓存规范化路径的图片字节及尺寸头；同一路径读取一次，不跨调用保存缓存。缓存与包内去重独立，`false` 仍生成独立媒体，各引用的尺寸、替代文字和绘图 ID 独立。累计缓存和待写媒体仍受 128 MiB 预算约束，单图仍最多 32 MiB，最终包预算还包括 XML。
 - 使用必需的 `blocks` 数组按顺序描述内容。
 - 使用可选 `page` 设置单节页面；默认 A4、上下 25.4mm、左右 31.8mm 页边距。横向页面交换宽高。
 - 使用可选 `styles` 设置正文、四级标题及表格正文/表头的样式；未提供的字段保留对应默认值。
@@ -49,7 +93,7 @@
 
 ## 样式字段与覆盖顺序
 
-仅在 `styles` 中使用 `body`、`heading1`、`heading2`、`heading3`、`heading4`、`table_body`、`table_header`；不要传入任意 Word 样式 ID。每一项均为部分字段对象。标题及普通段落可使用 `format` 对象覆盖下列字段；表格文字的额外字段和覆盖方式见下文：
+仅在 `styles` 中使用 `title`、`subtitle`、`body`、`heading1`、`heading2`、`heading3`、`heading4`、`table_body`、`table_header`；不要传入任意 Word 样式 ID。每一项均为部分字段对象。标题及普通段落可使用 `format` 对象覆盖下列字段；表格文字的默认值和覆盖方式见下文：
 
 | 字段 | 类型及范围 | 用途 |
 |---|---|---|
@@ -60,9 +104,13 @@
 | `align` | `left`、`center`、`right`、`justify` | 段落对齐。 |
 | `first_line_chars` | 数值，0–20 | 首行缩进字符数；0 取消首行缩进。 |
 | `line_spacing_pt` | 数值，1–400 | 固定行距，单位 pt；不接受倍数或自动行距字符串。 |
+| `line_spacing_multiple` | 数值，0.5–10 | 正文、标题及表格均支持倍数行距；与同层固定行距互斥。 |
+| `color` | 六位十六进制 RGB，不带 `#` | 正文、标题及表格均支持文字颜色。 |
 | `space_before_pt`、`space_after_pt` | 数值，0–400 | 段前、段后间距，单位 pt。 |
 
-按字段依次覆盖：内置默认值 → 对应 `styles` 项 → 当前块 `format` → 块级 `align`（仅对齐）→ run 字符字段（仅文字格式）。省略字段表示继承；禁止使用 `null` 表示默认值。不要用字符串、布尔值代替数值，不要使用 NaN、Infinity、负值或未知字段。
+按字段依次覆盖：内置主题默认值 → 对应 `styles` 项 → 当前块 `format` → 块级 `align`（仅对齐）→ run 字符字段（仅文字格式）。省略字段表示继承；禁止使用 `null` 表示默认值。不要用字符串、布尔值代替数值，不要使用 NaN、Infinity、负值或未知字段。
+
+普通段落与标题通过 `BodyText`、`Heading1` 至 `Heading4` 继承对应样式；仅将块和 run 显式指定的格式写为直接属性。后续修改 Word 样式可影响未局部覆盖的属性；显式覆盖即使与样式当前值相同也保留。
 
 使用 run 的 `font_east_asia`、`font_latin` 分别控制中西文字体。保留 run 的旧字段 `font`：它同时指定中西文字体；同一 run 中的专用字体字段再覆盖相应字体。例如 `{"text": "中文 ABC", "font": "Arial", "font_east_asia": "仿宋"}` 使用仿宋显示中文、Arial 显示西文。不要将 run 的 `font` 放入 `styles` 或 `format`。
 
@@ -72,16 +120,17 @@
 
 | type | 字段 | 约束 |
 |---|---|---|
+| title / subtitle | `text`, `format`, `align` | 文档标题与副标题，不接受 level，不占大纲层级。 |
 | heading | `text`, `level`, `format`, `align` | 明确提供 level，范围为 1–4；format 和 align 可选。 |
 | paragraph | `text` 或 `runs`, `format`, `align` | 不要同时给 text/runs；align 为 left、center、right、justify。 |
 | list | `items`, `ordered`, `list_id`, `level` | items 为字符串数组；旧单层用法不变，命名实例可按明确层级续号。 |
 | table | `rows`, `widths_mm`, `header`, `header_rows`, `format`, `body_format`, `header_format` | rows 为规则二维数组，单元格为字符串或受限 text/image/borders 对象；可指定列宽及前置表头行数。 |
-| image | `path`, `width_mm`, `height_mm`, `alt` | 仅嵌入 PNG/JPEG；明确给定显示宽高。 |
+| image | `path`, `width_mm`, `height_mm`, `alt` | 仅嵌入 PNG/JPEG；至少给定宽或高，缺少的尺寸由尺寸头等比例推算。 |
 | page_break | 无其他字段 | 插入手动分页。 |
 
 在 `runs` 中使用 `text`、`bold`、`italic`、`underline`、`font`、`font_east_asia`、`font_latin`、`size_pt`、`color`；颜色使用不带井号的六位十六进制 RGB。让 XML 库处理文本转义，禁止预先将 `&` 转成 `&amp;`。
 
-将文本字段限制为单行，禁止插入控制字符；多段文字拆成多个 paragraph 块。提供 image 的 `alt` 描述（允许空字符串），不要依赖图片尺寸自动推断。
+将文本字段限制为单行，禁止插入控制字符；多段文字拆成多个 paragraph 块。提供 image 的 `alt` 描述（允许空字符串），只给宽或高时读取 PNG IHDR（含头部 CRC）或 JPEG SOF 尺寸头推算比例；两项都给时保持显式尺寸。尺寸头检查不等于像素解码，不按 EXIF 方向旋转。
 
 按以下正反例构造输入；不要把自然语言需求直接当作生成器字段：
 
@@ -111,20 +160,33 @@
 
 ## 表格配置与示例
 
+在顶层 `table_format` 或单表 `format` 使用以下便捷字段；同层显式字段优先于预设默认值：
+
+| 字段 | 规则 |
+|---|---|
+| `preset` | `grid`、`three_line`、`zebra`；省略保持原有框线表。显式选择预设重设六边的样式与粗细；同层全局边框字段再覆盖预设，逐边字段优先。 |
+| `column_sizing` | `equal`（默认）或 `content`；显式 `widths_mm` 始终优先。内容估算按中西文字符权重平方根分配，保留每列留白及至少 8mm 内容宽；无法满足则报错。不是字体测量或阅读器 AutoFit。 |
+| `band_fill` | 六位 RGB 或 `none`；每隔一个数据行设置底色，表头不计入数据行。单元格条纹覆盖表格统一底色；显式 `none` 可关闭。 |
+
+`three_line` 默认顶底线 1.5pt、无竖线和内部横线；已声明表头且存在数据行时，在最后表头行之后加 0.75pt 分隔线。显式单元格共享边优先，原有冲突检测继续生效。`zebra` 默认无框线，第二个及后续偶数数据行底色为 `F2F4F7`。需要表头样式必须显式声明 `header` 或 `header_rows`，不猜测第一行。
+
+
 参照 GB/T 9704—2012 第 5.2.2 条的一般字体字号原则使用仿宋 16pt；将边框、留白、加粗、对齐、行距与跨页控制标为项目约定，不要声称这些具体参数均由国标规定。保留当前页面边距；不要将本预设宣称为整份文档的国标符合性检查。国标第 8 章的横排表格页码和单双页表头朝向需要另外的分节与分页能力，当前不提供。
 
 为 `styles.table_body` 和 `styles.table_header` 分别设置表格文字样式；不要让它们继承 `styles.body` 或相互继承。默认均为仿宋 16pt、西文 Times New Roman、黑色、首行缩进 0、段前段后 0、1.15 倍行距；正文不加粗且左对齐，表头加粗且居中。
 
-在表格文字样式中使用上文的字体、字号、加粗、对齐、缩进、段距及固定行距字段，并允许以下额外字段：
+表格文字与普通正文共用上述格式字段；以下列出颜色及倍数行距的表格默认值：
 
 | 字段 | 类型及范围 | 用法 |
 |---|---|---|
 | `color` | 六位十六进制 RGB，不带 `#` | 默认 `"000000"`。 |
 | `line_spacing_multiple` | 数值，0.5–10 | 默认 1.15；使用倍数行距。 |
 
-在同一对象中仅提供 `line_spacing_pt` 或 `line_spacing_multiple` 之一；不要同时传入。后续层显式指定一种行距时替换前一层的行距模式，例如从固定 24pt 改为 1.5 倍。上述额外字段仅适用于表格文字样式；普通段落、标题的 `format` 不接受它们。
+在同一对象中仅提供 `line_spacing_pt` 或 `line_spacing_multiple` 之一；不要同时传入。后续层显式指定一种行距时替换前一层的行距模式，例如从固定 24pt 改为 1.5 倍。普通段落、标题和表格文字样式均接受颜色及倍数行距。
 
 按“内置表格文字默认值 → `styles.table_body` / `styles.table_header` → 当前表格的 `body_format` / `header_format`”逐字段覆盖。正文和表头分别计算，不要将 `body_format` 当作整张表格的通用文字覆盖；需要统一字体时分别设置两者。单元格默认用字符串，或按 [列表与表格细节](generation-details.md) 使用严格的 text/image/borders 对象；不接受任意 run、段落或合并布局。
+
+将公共文字格式保存在 `TableBody` / `TableHeader`，各单元格仅引用样式；仅写出单表显式 `body_format` / `header_format` 的直接属性。显式覆盖即使与全局样式相同也保留，`false` 及固定/倍数行距切换仍有效。后续在 Word 中修改公共样式可影响未局部覆盖的属性；不要仅检查单元格直接属性来判断最终格式。
 
 在顶层 `table_format` 和表格块的 `format` 中使用同一组布局字段；按“内置布局默认值 → 顶层 `table_format` → 单表 `format`”覆盖：
 

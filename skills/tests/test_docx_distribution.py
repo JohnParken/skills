@@ -15,6 +15,74 @@ ARCHIVE = ROOT / "docx.zip"
 
 
 class DocxDistributionTests(unittest.TestCase):
+    def test_extracted_header_and_page_number_footer_follow_theme(self):
+        with tempfile.TemporaryDirectory(prefix="docx-distribution-related-") as folder:
+            work = Path(folder)
+            with zipfile.ZipFile(ARCHIVE) as package:
+                package.extractall(work)
+            entry = work / "docx/scripts/create_docx.py"
+            from xml.etree import ElementTree as ET
+            namespace = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+            for theme, east_asia, latin in (("business", "微软雅黑", "Calibri"),
+                                            ("academic", "宋体", "Times New Roman")):
+                with self.subTest(theme=theme):
+                    source = work / "input.json"
+                    source.write_text(json.dumps({"theme": theme, "header": "页眉 Header",
+                                                  "page_numbers": True, "blocks": []}, ensure_ascii=False), encoding="utf-8")
+                    result = subprocess.run([sys.executable, "-I", "-S", "-B", str(entry),
+                                             "input.json", "output.docx", "--verify"], cwd=work,
+                                            env=dict(os.environ, PATH=""), capture_output=True, text=True)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    with zipfile.ZipFile(work / "output.docx") as archive:
+                        styles = ET.fromstring(archive.read("word/styles.xml"))
+                        for part, style_id in (("header1.xml", "Header"), ("footer1.xml", "Footer")):
+                            related = ET.fromstring(archive.read("word/" + part))
+                            reference = related.find(f"{namespace}p/{namespace}pPr/{namespace}pStyle")
+                            self.assertEqual(reference.get(namespace + "val"), style_id)
+                            style = next(node for node in styles if node.get(namespace + "styleId") == style_id)
+                            fonts = style.find(f"{namespace}rPr/{namespace}rFonts")
+                            self.assertEqual(fonts.get(namespace + "eastAsia"), east_asia)
+                            self.assertEqual(fonts.get(namespace + "ascii"), latin)
+                            self.assertEqual(style.find(f"{namespace}rPr/{namespace}sz").get(namespace + "val"), "21")
+
+    def test_extracted_ux_pipeline_preflight_verify_and_atomic_failure(self):
+        with tempfile.TemporaryDirectory(prefix="docx-distribution-ux-") as folder:
+            work = Path(folder)
+            with zipfile.ZipFile(ARCHIVE) as package:
+                package.extractall(work)
+            entry = work / "docx/scripts/create_docx.py"
+            spec = {"theme": "business", "blocks": [
+                {"type": "title", "text": "分发包验收"},
+                {"type": "paragraph", "text": "中文与 English 原样保留"},
+                {"type": "table", "header": True, "format": {"preset": "three_line", "column_sizing": "content"},
+                 "rows": [["序号", "说明"], ["1", "已完成集成检查"]]},
+            ]}
+            source = work / "input.json"
+            source.write_text(json.dumps(spec, ensure_ascii=False), encoding="utf-8")
+
+            def cli(*args):
+                return subprocess.run([sys.executable, "-I", "-S", "-B", str(entry), *args],
+                                      cwd=work, env=dict(os.environ, PATH=""), capture_output=True, text=True)
+
+            checked = cli("--check")
+            self.assertEqual(checked.returncode, 0, checked.stderr)
+            self.assertIn("expat=", checked.stdout)
+            preflight = cli("input.json", "--preflight")
+            self.assertEqual(preflight.returncode, 0, preflight.stderr)
+            self.assertEqual(json.loads(preflight.stdout)["status"], "preflight-ok")
+            self.assertFalse((work / "output.docx").exists())
+            generated = cli("input.json", "output.docx", "--verify", "--require-no-placeholders")
+            self.assertEqual(generated.returncode, 0, generated.stderr)
+            self.assertTrue(json.loads(generated.stdout)["content_coverage"])
+            before = (work / "output.docx").read_bytes()
+            spec["blocks"].append({"type": "paragraph", "text": "{{未填充}}"})
+            source.write_text(json.dumps(spec, ensure_ascii=False), encoding="utf-8")
+            rejected = cli("input.json", "output.docx", "--require-no-placeholders")
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertIn("Unfilled placeholder", rejected.stderr)
+            self.assertEqual((work / "output.docx").read_bytes(), before)
+            self.assertFalse(list(work.glob(".output.docx.*.tmp")))
+
     def test_distribution_matches_source_without_metadata_or_caches(self):
         expected = {path.relative_to(ROOT).as_posix(): path.read_bytes()
                     for path in (ROOT / "docx").rglob("*") if path.is_file()}

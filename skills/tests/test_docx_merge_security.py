@@ -130,6 +130,42 @@ class MergeSecurityTests(unittest.TestCase):
                                str(source), *map(str, args)], env=dict(os.environ, PATH=""),
                               cwd=self.root, capture_output=True, text=True)
 
+    def test_packaged_cli_requires_distinct_output_and_preserves_source(self):
+        original = self.source.read_bytes()
+        omitted = self.cli(self.source)
+        self.assertNotEqual(omitted.returncode, 0)
+        self.assertEqual(self.source.read_bytes(), original)
+        same = self.cli(self.source, "-o", self.source)
+        self.assertNotEqual(same.returncode, 0)
+        self.assertEqual(self.source.read_bytes(), original)
+        relative_alias = self.cli(Path("./input.docx"), "-o", Path("./input.docx"))
+        self.assertNotEqual(relative_alias.returncode, 0)
+        self.assertEqual(self.source.read_bytes(), original)
+        linked = self.root / "hardlink.docx"
+        os.link(self.source, linked)
+        hardlink = self.cli(self.source, "-o", linked)
+        self.assertNotEqual(hardlink.returncode, 0)
+        self.assertEqual(self.source.read_bytes(), original)
+        self.assertEqual(linked.read_bytes(), original)
+        output = self.root / "distinct.docx"
+        result = self.cli(self.source, "-o", output)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.source.read_bytes(), original)
+        self.assertTrue(output.is_file())
+        dotx_docx = create_document({"blocks": [{"type": "paragraph", "text": "DOTX"}]}, self.root / "dotx-source.docx")
+        dotx = self.root / "input.dotx"
+        with zipfile.ZipFile(dotx_docx) as source_package, zipfile.ZipFile(dotx, "w") as target_package:
+            for item in source_package.infolist():
+                content = source_package.read(item.filename)
+                if item.filename == "[Content_Types].xml":
+                    content = content.replace(b"wordprocessingml.document.main+xml",
+                                              b"wordprocessingml.template.main+xml")
+                target_package.writestr(item, content)
+        dotx_output = self.root / "merged.dotx"
+        result = self.cli(dotx, "-o", dotx_output)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(dotx_output.is_file())
+
     def test_cli_rejects_link_outputs_and_cross_format_names(self):
         original = self.source.read_bytes()
         output = self.root / "linked.docx"

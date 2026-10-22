@@ -1,8 +1,11 @@
 """Protect low-level comment preparation from known invalid inputs and IDs."""
 
 import sys
+import os
+import subprocess
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 from unittest import mock
 
@@ -10,6 +13,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "docx/scripts"))
 import comment
 from create_docx import create_document
 from office.package import unpack_document
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 class CommentPreflightTests(unittest.TestCase):
@@ -120,6 +125,74 @@ class CommentPreflightTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     comment.add_comment(self.directory, "new", comment_id=0)
                 self.assertEqual(self.snapshot(), before)
+
+    def cli(self, source, *args):
+        return subprocess.run([sys.executable, "-I", "-S", "-B", str(ROOT / "docx/scripts/comment.py"),
+                               str(source), *map(str, args)], env=dict(os.environ, PATH=""),
+                              cwd=self.root, capture_output=True, text=True)
+
+    def test_packaged_cli_requires_distinct_output_and_preserves_source(self):
+        source = self.root / "packaged.docx"
+        source.write_bytes((self.root / "input.docx").read_bytes())
+        original = source.read_bytes()
+        omitted = self.cli(source, "comment")
+        self.assertNotEqual(omitted.returncode, 0)
+        self.assertEqual(source.read_bytes(), original)
+        same = self.cli(source, "comment", "-o", source)
+        self.assertNotEqual(same.returncode, 0)
+        self.assertEqual(source.read_bytes(), original)
+        relative_alias = self.cli(Path("./packaged.docx"), "comment", "-o", Path("./packaged.docx"))
+        self.assertNotEqual(relative_alias.returncode, 0)
+        self.assertEqual(source.read_bytes(), original)
+        linked = self.root / "hardlink.docx"
+        os.link(source, linked)
+        hardlink = self.cli(source, "comment", "-o", linked)
+        self.assertNotEqual(hardlink.returncode, 0)
+        self.assertEqual(source.read_bytes(), original)
+        self.assertEqual(linked.read_bytes(), original)
+        output = self.root / "annotated.docx"
+        result = self.cli(source, "comment", "-o", output)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(source.read_bytes(), original)
+        with zipfile.ZipFile(output) as package:
+            dom = comment.parse_dom(package.read("word/comments.xml"))
+        note = dom.getElementsByTagNameNS(comment.NS["w"], "comment")[0]
+        self.assertEqual(note.getAttributeNS(comment.NS["w"], "author"), "Editor")
+        self.assertEqual(note.getAttributeNS(comment.NS["w"], "initials"), "E")
+        override = self.root / "override.docx"
+        result = self.cli(source, "comment", "-o", override, "--author", "Reviewer", "--initials", "RV")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        with zipfile.ZipFile(override) as package:
+            dom = comment.parse_dom(package.read("word/comments.xml"))
+        note = dom.getElementsByTagNameNS(comment.NS["w"], "comment")[0]
+        self.assertEqual((note.getAttributeNS(comment.NS["w"], "author"),
+                          note.getAttributeNS(comment.NS["w"], "initials")), ("Reviewer", "RV"))
+        dotx_docx = create_document({"blocks": [{"type": "paragraph", "text": "DOTX"}]}, self.root / "input.docx")
+        dotx = self.root / "input.dotx"
+        with zipfile.ZipFile(dotx_docx) as source_package, zipfile.ZipFile(dotx, "w") as target_package:
+            for item in source_package.infolist():
+                content = source_package.read(item.filename)
+                if item.filename == "[Content_Types].xml":
+                    content = content.replace(b"wordprocessingml.document.main+xml",
+                                              b"wordprocessingml.template.main+xml")
+                target_package.writestr(item, content)
+        dotx_output = self.root / "annotated.dotx"
+        result = self.cli(dotx, "comment", "-o", dotx_output)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(dotx_output.is_file())
+
+    def test_directory_cli_rejects_output_and_comment_author_overrides_work(self):
+        before = self.snapshot()
+        result = self.cli(self.directory, "comment", "-o", self.root / "ignored.docx")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.snapshot(), before)
+        comment.add_comment(self.directory, "default")
+        comment.add_comment(self.directory, "override", author="Reviewer", initials="RV")
+        dom = comment.parse_dom(comment.read_xml(self.directory / "word/comments.xml"))
+        notes = dom.getElementsByTagNameNS(comment.NS["w"], "comment")
+        self.assertEqual([(n.getAttributeNS(comment.NS["w"], "author"),
+                           n.getAttributeNS(comment.NS["w"], "initials")) for n in notes],
+                         [("Editor", "E"), ("Reviewer", "RV")])
 
 
 if __name__ == "__main__":

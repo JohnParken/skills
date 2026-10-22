@@ -144,6 +144,7 @@ class GenerationDetailsTests(unittest.TestCase):
         self.assertEqual(len(blips), 3)
         self.assertEqual(len({node.get(f"{{{R}}}embed") for node in blips}), 3)
         self.assertEqual(len({node.get("id") for node in drawings}), 3)
+        self.assertEqual([node.get("descr") for node in drawings], ["正文图片", "单元格图片", "单元格图片"])
         self.assertEqual(len([name for name in parts if name.startswith("word/media/")]), 3)
         self.assertIn("中文图片说明", [node.text for node in doc.iter(q("t"))])
         table = next(doc.iter(q("tbl")))
@@ -160,6 +161,14 @@ class GenerationDetailsTests(unittest.TestCase):
                 self.reject({"blocks": [{"type": "table", "widths_mm": [30], "rows": [[cell]]}]})
         self.image.write_bytes(b"not image data")
         self.reject({"blocks": [{"type": "table", "rows": [[self.image_cell()]]}]})
+
+    def test_cell_image_diagnostics_identify_the_nested_field(self):
+        self.image.write_bytes(b"invalid PNG")
+        for updates, field in (({}, "path"), ({"path": 123}, "path"), ({"alt": None}, "alt")):
+            with self.subTest(updates=updates):
+                spec = {"blocks": [{"type": "table", "rows": [[self.image_cell(**updates)]]}]}
+                with self.assertRaisesRegex(ValueError, rf"blocks\[0\]\.rows\[0\]\[0\]\.image\.{field}"):
+                    create_document(spec, self.output, base_dir=self.work)
 
     def test_cell_image_input_cannot_be_overwritten_by_output(self):
         image_alias = self.work / "image-output.docx"

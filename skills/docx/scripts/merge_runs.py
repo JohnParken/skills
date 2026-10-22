@@ -15,6 +15,7 @@ atomic repacking; signed packages and symbolic links are rejected.
 import argparse
 import contextlib
 import io
+import os
 import sys
 import tempfile
 import zipfile
@@ -244,7 +245,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("input", type=Path, help="Unpacked directory or DOCX/DOTX file")
     parser.add_argument("-o", "--output", type=Path,
-                        help="Output document; packaged input defaults to an atomic in-place rewrite")
+                        help="Required output document for packaged input")
     args = parser.parse_args(argv)
     source = args.input
     try:
@@ -255,7 +256,13 @@ def main(argv=None):
                 raise ValueError("Directory input is modified in place and takes no --output")
             print(_merge_or_die(source))
         elif source.is_file() and source.suffix.lower() in {".docx", ".dotx"}:
-            output = args.output if args.output is not None else source
+            if args.output is None:
+                raise ValueError("Packaged input requires an explicit --output path")
+            output = args.output
+            same_path = output.resolve(strict=False) == source.resolve(strict=True)
+            same_file = output.exists() and os.path.samefile(source, output)
+            if same_path or same_file:
+                raise ValueError("Output must be distinct from input")
             if output.suffix.lower() != source.suffix.lower():
                 raise ValueError("Input and output must have the same DOCX/DOTX extension")
             if output.is_symlink():

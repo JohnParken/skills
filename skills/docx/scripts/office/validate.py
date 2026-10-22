@@ -22,14 +22,19 @@ except ImportError:
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("path", type=Path, help="DOCX/DOTX file or unpacked directory")
-    parser.add_argument("--original", type=Path, help="Original DOCX/DOTX for optional text comparison")
-    parser.add_argument("--author", help="Enable body text revision comparison; requires --original")
+    parser.add_argument("--original", type=Path,
+                        help="Original DOCX/DOTX; compare body text after structure checks")
+    parser.add_argument("--author", help=(
+        "Deprecated compatibility option; requires --original. Its value does not filter authors."
+    ))
     parser.add_argument("--require-no-placeholders", action="store_true",
                         help="Reject remaining {{...}} placeholders")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args(argv)
     if args.author is not None and not args.original:
         parser.error("--author requires --original")
+    if args.author is not None:
+        print("Deprecated --author accepted for compatibility; its value does not filter authors.")
     if not args.path.exists():
         parser.error(f"{args.path} does not exist")
     if args.path.is_file() and args.path.suffix.lower() not in OOXML_FAMILY:
@@ -39,6 +44,16 @@ def main(argv=None):
     ):
         parser.error("--original must be an existing .docx or .dotx file")
     try:
+        if args.path.is_file() and not args.original:
+            with open_archive(args.path) as archive:
+                validator = StructureValidator.from_archive(
+                    archive, extension=args.path.suffix.lower(),
+                    require_no_placeholders=args.require_no_placeholders,
+                )
+                if not validator.validate():
+                    return 1
+            print("Basic structure checks PASSED. XSD and visual validation were not performed.")
+            return 0
         with tempfile.TemporaryDirectory(prefix="docx-check-") as tmp:
             unpacked = args.path
             extension = None
@@ -52,7 +67,7 @@ def main(argv=None):
                 require_no_placeholders=args.require_no_placeholders,
             )
             success = validator.validate()
-            if success and args.author is not None:
+            if success and args.original:
                 success = RedliningValidator(
                     unpacked, args.original, verbose=args.verbose
                 ).validate()
@@ -62,8 +77,6 @@ def main(argv=None):
         print(f"FAILED - {exc}", file=sys.stderr)
         return 1
     print("Basic structure checks PASSED. XSD and visual validation were not performed.")
-    if args.original and args.author is None:
-        print("Original supplied; revision comparison requires --author.")
     return 0
 
 

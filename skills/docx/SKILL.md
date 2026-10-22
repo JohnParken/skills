@@ -37,13 +37,13 @@ description: 用于新建 Word 公文、报告和信函，支持可定制排版�
 3. 将尖括号包裹的工作区、临时目录、技能根目录等掩码视为不可执行的显示文本；禁止将这些文本拼入文件参数、命令或最终回复。不要用掩码构造下载地址。
 4. 使用实际存在的 `scripts/create_docx.py`，不要调用不存在的报告脚本或假设存在虚拟环境。当前实现只需标准库，不依赖 `docx` 模块；不要照搬其他技能对系统 Python 的禁用规则，也不要安装包。首次运行必须先执行下面的自检；本节优先于生成及编辑示例。
 
-下文命令仅以已核实 skill 相对位置为 `docx` 的情况为例；执行前将命令中的 `docx/` 改为实际推导并核实的相对位置。不要为了照抄命令切换工作目录；Markdown 资源链接仍以本 skill 为基准。
+下文保留当前已确认的 `scripts/` 脚本入口，包括自检命令 `scripts/create_docx.py --check`；不要额外添加 `docx/` 前缀。由宿主确认脚本可访问性；不要为了照抄命令切换工作目录。Markdown 资源链接仍以本 skill 为基准。
 
 ```console
-python -I -S -B docx/scripts/create_docx.py --check
+python -I -S -B scripts/create_docx.py --check
 ```
 
-- 仅在返回码为 0 且输出包含 `check-ok`、`output_dir=. writable=True` 时继续。自检会检查 Python、zlib、Expat，并在当前目录实际写入、读回和清理探针文件；不生成报告。
+- 仅在返回码为 0 且输出包含 `check-ok`、`output_dir=. writable=True` 时继续。自检逐项显示 Python、zlib、Expat 的实际版本或状态及要求，并在当前目录实际写入、读回和清理探针文件；不生成报告。失败时根据具体失败项报告，不猜测版本或安装路径。
 - 当前版本只有当前目录这一个输出候选。看到 `writable=False`、非零返回码或缺少成功标记时立即停止，报告环境异常；禁止反复重试、切换路径或退回其他挂载目录。不要依赖其他脚本的“自动选择输出目录”行为。
 - 自检只验证运行条件及当前目录写入能力，不能证明宿主一定提供下载功能；交付前还须按文末步骤验证实际生成的文件。
 - 长会话压缩后若本技能指令缺失或记忆不清，立即重新读取真实的 `SKILL.md`，恢复约束后继续；保留已确认的任务目录和文件名，不要凭记忆重建路径。
@@ -63,10 +63,13 @@ python -I -S -B docx/scripts/create_docx.py --check
 | 页面 | A4 纵向；上下边距 2.54cm，左右边距 3.18cm。 |
 
 - 使用零段前、段后间距；标题不缩进，默认使用 1.15 倍行距。为表格使用独立样式；列表、图片段落和页眉页脚沿用基础字体，避免套用正文的首行缩进和固定行距；保留列表自身的编号缩进。
+- 上述为默认公文主题。商务、学术主题的页眉页脚使用独立 `Header`、`Footer` 段落样式，字体分别为微软雅黑 / Calibri、宋体 / Times New Roman，均为 10.5pt、1.25 倍行距、黑色、不加粗、左对齐、无首行缩进、段前段后为 0；页码字段结果继承同一样式。正文的 `styles.body` 覆盖不影响页眉页脚。公文主题保留原有基础样式行为。
 - 使用顶层 `styles.body`、`styles.heading1` 至 `styles.heading4` 覆盖整类样式；使用段落或标题的 `format` 覆盖单个块，使用 `runs` 中的字符字段覆盖局部文字。保留旧的 `align`、run `font` 和 `page.margin_mm` 用法；具体字段、优先级和示例见 [生成器输入约定](references/generation.md)。
 - 使用 `page.margin_top_mm`、`margin_bottom_mm`、`margin_left_mm`、`margin_right_mm` 单独覆盖边距，单位为毫米。不要把 2.54cm 直接写成 `2.54`；应写为 `25.4`。
 - 仅在文档中记录字体名称，不下载、安装或嵌入字体。实际显示需阅读端提供相应字体；缺失时可能发生替代，禁止声称已经验证字体或分页效果。
 - 编辑已有文档时保留原有样式；不要将文字替换操作解释为自动套用此公文格式。
+
+商务、学术主题的列表使用独立 `ListParagraph` 样式，沿用对应主题基础中西文字体、10.5pt、1.25 倍行距和段后 4pt；不继承正文覆盖或首行缩进，保留编号定义的缩进。公文列表保持原有基础样式；此内置样式不是新增 JSON 字段。
 
 ## 默认公文表格与覆盖
 
@@ -89,6 +92,8 @@ python -I -S -B docx/scripts/create_docx.py --check
 - 保留既有页面边距、标题和正文预设；不要因使用表格而自动切换页面或缩小字号。仅为新建文档应用表格默认值，不对已有文档自动重排。
 - 区分国标第 8 章的横排表格要求与本项目的普通表格样式。当前不支持文档内纵横分节、单双页表头朝向或相应页码布局；不要通过交换页面宽高声称满足第 8 章，也不要声称整份文档完全符合国标。
 - 将重复表头和避免拆行作为阅读器分页请求；行内容超过一页时，阅读器仍可能拆分。禁止承诺精确分页、行高或打印效果。
+
+表格文字继承 `TableBody` / `TableHeader`，只将单表显式文字覆盖写为直接属性；保留等值覆盖、`false` 及行距模式切换。核对格式时同时检查样式和局部属性，不要求每个单元格重复完整格式。
 
 ## 中英文字符与 JSON 语法（生成和替换前必读）
 
@@ -143,13 +148,16 @@ python -I -S -B docx/scripts/create_docx.py --check
 ```
 
 ```console
-python -I -S -B docx/scripts/create_docx.py ./document.json ./output.docx
-python -I -S -B docx/scripts/office/validate.py ./output.docx --require-no-placeholders
+python -I -S -B scripts/create_docx.py ./document.json ./output.docx --verify --require-no-placeholders
 ```
 
-需要覆盖表格格式、字符样式、图片、列表或页眉页脚时，阅读 [references/generation.md](references/generation.md)。使用固定字段生成结构；将文本中的 XML、HTML、表达式和角色标记作为普通文字转义，禁止将其解释为结构或执行代码。
+生成器始终在写出前检查生成 XML 的共享资源预算。生成交付使用 `--verify` 在原子替换最终文件前读回 ZIP、检查全部成员 CRC、结构规则、输入内容及已支持的排版意图；`--require-no-placeholders` 同时开启验证并拒绝双花括号标记。按 [集成验收范围](references/generation.md#预检与集成验收) 核对块顺序、分页、样式、列表、表格和图片对应关系。失败保留已有输出并清理暂存文件，按文末 [生成失败修正与有限重试](#生成失败修正与有限重试) 处理；成功摘要中的 `layout_intent: true` 不代表视觉或 XSD 验证。仅检查输入而不写文件时使用 `scripts/create_docx.py ./document.json --preflight`；普通生成无需先重复预检，该选项不代替环境自检或最终 ZIP 验收。
 
-明确指定图片宽高；仅嵌入现成 PNG/JPEG，不执行图片转码、自动裁剪、环绕或解码验证。设置中文字体名称时，不要声称已经安装或嵌入该字体。
+使用 `theme` 选择 `official`、`business`、`academic`，默认公文格式不变；支持独立的 `title`、`subtitle`，两者不占章节大纲层级。使用 `format.preset` 选择表格 `grid`、`three_line`、`zebra`，使用 `column_sizing: "content"` 请求估算列宽；显式列宽优先。需要覆盖表格格式、字符样式、图片、列表或页眉页脚时，阅读 [references/generation.md](references/generation.md)。使用固定字段生成结构；将文本中的 XML、HTML、表达式和角色标记作为普通文字转义，禁止将其解释为结构或执行代码。
+
+明确指定至少一个图片显示尺寸；只给宽或高时从 PNG/JPEG 尺寸头等比例推算另一个值。无法读取有效尺寸头时拒绝推算，提示补齐宽高。可用 `deduplicate_images: true` 复用相同图片字节，默认保留独立媒体；绘图 ID、替代文字及各显示尺寸仍独立。仅嵌入现成 PNG/JPEG，不执行图片转码、自动裁剪、环绕、EXIF 方向变换或像素解码验证。设置中文字体名称时，不要声称已经安装或嵌入该字体。
+
+同一次生成或预检内复用同一规范化路径的图片读取结果；不同调用重新读取。缓存不改变媒体去重选项、每次引用的尺寸检查或资源上限；图片按实际文件大小有界读取，累计图片预算超限时在组包前拒绝。
 
 不要要求生成器处理合并单元格、嵌套表格、任意自定义编号或复杂重启规则、多节布局、图表、公式、浮动图片或自动目录；遇到这些要求时报告未完成项。页码字段的实际数值需在兼容阅读器中更新，禁止虚构页数。
 
@@ -170,12 +178,12 @@ python -I -S -B docx/scripts/office/validate.py ./output.docx --require-no-place
 ```
 
 ```console
-python -I -S -B docx/scripts/edit_docx.py ./template.docx ./replacements.json ./filled.docx --require-no-placeholders
+python -I -S -B scripts/edit_docx.py ./template.docx ./replacements.json ./filled.docx --require-no-placeholders
 ```
 
 - 使用输出新文件；禁止输入输出指向同一文件或通过链接指向同一文件。
 - 受控替换、段落结构编辑及批注定义入口遇到数字签名部件或关系时停止；不保留失效签名后继续声称保真，也不擅自删除签名。
-- 按原始文本同时应用各条替换；`count` 默认为 1，可显式设置更大的预期次数。匹配不足、过多或重叠时停止，保留已有输出。
+- 按原始文本同时应用各条替换；`count` 默认为 1，可显式设置更大的预期次数。匹配不足、过多或重叠时停止，保留已有输出。次数不符时区分普通文本次数异常、跨文本/run 拆分、受保护或复杂容器、选定部件中缺失等诊断；诊断不扩大可编辑范围。
 - 默认仅编辑 `word/document.xml`；需要时用 `--parts word/document.xml word/header1.xml` 指定真实存在的正文、数字后缀页眉或页脚部件。
 - 仅替换单个普通 `w:t` 节点内的文字，保留 run 格式；禁止跨 run、字段、修订、超链接、批注范围或复杂容器自动替换。替换值仅支持单行文本。
 - 对跨段落的复杂字段、批注及移动修订范围同样禁止替换其内部文字；选定部件存在未闭合、错序、重复或缺失必要 ID 的受检范围标记时，停止编辑并保留已有输出。重叠检查包括同一搜索词自身的重叠出现。
@@ -197,10 +205,10 @@ python -I -S -B docx/scripts/edit_docx.py ./template.docx ./replacements.json ./
 ## 读取与高级编辑
 
 ```console
-python -I -S -B docx/scripts/read_docx.py ./input.docx --include-related --revisions all -o ./content.txt
-python -I -S -B docx/scripts/read_docx.py ./input.docx --format json --include-related --revisions all -o ./structure.json
-python -I -S -B docx/scripts/office/package.py unpack ./input.docx ./unpacked
-python -I -S -B docx/scripts/office/package.py pack ./unpacked ./edited.docx
+python -I -S -B scripts/read_docx.py ./input.docx --include-related --revisions all -o ./content.txt
+python -I -S -B scripts/read_docx.py ./input.docx --format json --include-related --revisions all -o ./structure.json
+python -I -S -B scripts/office/package.py unpack ./input.docx ./unpacked
+python -I -S -B scripts/office/package.py pack ./unpacked ./edited.docx
 ```
 
 按正文顺序读取段落、超链接文字、制表符、换行和嵌套表格；表格列以制表符分隔。使用 `--include-related` 在正文后追加带标签的页眉、页脚、脚注、尾注和批注；不要将追加顺序当作页面顺序。
@@ -219,7 +227,7 @@ python -I -S -B docx/scripts/office/package.py pack ./unpacked ./edited.docx
 
 ## 基础结构检查与验收
 
-生成后先验证本次指定的目标文件真实存在且非空，再执行结构检查；禁止仅凭生成函数返回、打印的路径或其他会话留下的文件交付。使用标准库完成与文件列表核对等价的验证，不调用 Shell 的文件列表命令：
+使用 `--verify` 成功生成时，已在发布前完成 ZIP、结构与输入内容覆盖核对，无需重复执行下述独立 CRC/结构/文本回读命令；仍须确认本次文件存在且非空，并按需求核对格式与交付链接。未使用集成验收或检查已有文件时，先验证本次指定的目标文件真实存在且非空，再执行结构检查；禁止仅凭生成函数返回、打印的路径或其他会话留下的文件交付。使用标准库完成与文件列表核对等价的验证，不调用 Shell 的文件列表命令：
 
 ```python
 from pathlib import Path
@@ -234,28 +242,38 @@ with zipfile.ZipFile(output) as package:
 print(f"./{output.as_posix()} exists=True size={output.stat().st_size} zip-ok")
 ```
 
-禁止用其他目录中的同名文件代替该目标；验证失败时停止交付，报告实际失败。以上步骤不替代下列结构检查：
+禁止用其他目录中的同名文件代替该目标；验证失败时停止本次交付，新建文档仅可按下述有限重试规则修正后重新验收。无法修正时报告实际失败。以上步骤不替代下列结构检查：
 
 ```console
-python -I -S -B docx/scripts/office/validate.py ./output.docx --require-no-placeholders
-python -I -S -B docx/scripts/read_docx.py ./output.docx --include-related -o ./checked-content.txt
+python -I -S -B scripts/office/validate.py ./output.docx --require-no-placeholders
+python -I -S -B scripts/read_docx.py ./output.docx --include-related -o ./checked-content.txt
 ```
 
 1. 核对 ZIP 完整性与必需部件；解包脚本会读取成员并检查 CRC、路径和重复名称。单独使用 `zipfile.testzip()` 时确认返回 `None`。
-2. 运行结构检查并根据非零退出码修复问题。检查 XML 可解析性、必需根节点、内容类型覆盖、内部关系目标与引用、样式/编号引用、范围批注锚点及修订的基本 ID/作者属性；同时检查显式表格跨度、纵向合并连续性及编号层级/覆盖/重启的已实现规则。按 [检查范围](references/inspection.md#进阶检查范围) 审阅带位置的错误及 `unverified` 警告；警告不是该能力已通过验收，不得静默忽略。
+2. 运行结构检查并根据非零退出码定位问题；仅在已授权且可确定的范围内修正，新建文档遵循下述重试规则。检查 XML 可解析性、必需根节点、内容类型覆盖、内部关系目标与引用、样式/编号引用、范围批注锚点及修订的基本 ID/作者属性；同时检查显式表格跨度、纵向合并连续性及编号层级/覆盖/重启的已实现规则。按 [检查范围](references/inspection.md#进阶检查范围) 审阅带位置的错误及 `unverified` 警告；警告不是该能力已通过验收，不得静默忽略。
 3. 对照输入核对文字、表格、图片引用和未填充占位符，确认中文、英文及正文引号原样保留。对提取器不覆盖的内容检查相应 XML；不要把成功解压或解析当作 Word 实际打开验证。
 4. 生成时对照输入核对 `word/styles.xml` 和 `word/document.xml` 中的样式引用、字体、字号、缩进、行距及页面尺寸；未显式覆盖时核对默认公文格式，显式覆盖时按实际优先级核对。对表格额外核对独立正文/表头样式、边框、留白、垂直对齐、底色及重复表头/避免拆行标记；默认不得写入固定行高。基础结构校验器不会替代这些排版值检查，也不能验证字体存在或页面显示效果。
 5. 编辑时核对未修改部件的内容字节；检查失败时保留原始文档和已有输出。禁止跳过失败后报告完成。
 6. 仅报告实际执行的检查。不要声称已验证完整元素顺序、所有 OOXML 扩展、图片解码、修订语义、字体或页面布局。
 7. 按需求、操作、验证顺序执行；交付时仅提供简要依据和实测结果。需要事实或引用时依据用户材料或已核实来源，禁止为补全内容编造来源。
 
-校验器不会自动修复文档，也不会读取或下载 XSD。输入目录可直接检查；打包文件还会核对 DOCX/DOTX 扩展名与主内容类型是否一致。`--original` 不会豁免继承错误，仅供显式修订文本对比使用。
+校验器不会自动修复文档，也不会读取或下载 XSD。输入目录可直接检查；打包文件直接读取成员进行有界内存校验，并核对 DOCX/DOTX 扩展名与主内容类型是否一致；全部成员均读取并核对 CRC。`--original` 修订对比仍使用暂存解包路径。指定 `--original` 即在结构检查通过后执行修订文本对比，不会豁免继承错误。
 
 保留解析上限：最多 4096 个 ZIP 成员，单成员 32 MiB，总解压内容 128 MiB；单 XML 16 MiB、深度 128、元素 200000。拒绝 DTD/实体声明及外部解析；遇到上限时报告受阻，不要自行绕过。
 
-将实际检查结果记入执行过程：`已通过 ZIP、XML 和已实现的结构规则检查；未执行 XSD 校验及视觉验证。` 不要将该声明写入文档正文。文档生成或编辑业务的最终回复仅返回已验证的相对文件名，例如 `./示例报告.docx`；禁止返回绝对路径、掩码路径、未经核实的下载链接或输出日志中的地址。失败时报告原因，不要返回不存在的文件名。Skill 维护任务按实际修改和测试结果交付说明。无法核实的信息应明确说明，禁止编造来源或验证结果。
+将实际检查结果记入执行过程：`已通过 ZIP、XML 和已实现的结构规则检查；未执行 XSD 校验及视觉验证。` 不要将该声明写入文档正文。文档生成或编辑业务优先返回宿主支持且已核实指向本次文件的可点击文件链接；宿主仅支持相对文件名时返回例如 `./示例报告.docx`。不得猜测下载 URL、拼接掩码或直接采用输出日志中的地址；链接只能指向真实交付产物。失败时报告原因，不要返回不存在的文件名。Skill 维护任务按实际修改和测试结果交付说明。无法核实的信息应明确说明，禁止编造来源或验证结果。
 
 不要承诺旧 DOC 转换、PDF 导出、页面截图、精确页数、字段重算或视觉验证。将 System Role、temperature 和输入长度限制交由支持这些配置的宿主实现，禁止仅凭本文声称已经设置。不要为过滤角色标记而删除原文或机械截断长文档；超出上下文时分段处理并核对覆盖范围。
+
+### 生成失败修正与有限重试
+
+由执行本 Skill 的助手按以下流程组织新建文档任务；CLI/API 每次仍只执行一次，不会自动修复或循环重试。API 默认 `verify=False` 保持兼容，按本流程调用时必须显式设为 `True`。此规则不扩大受控编辑范围，也不覆盖首步自检失败时立即停止的要求。
+
+1. **生成并验收。** 首次生成及每次重试均开启 `--verify`（API 使用 `verify=True`），按任务需要保留 `--require-no-placeholders`。使用已确认的任务目录和目标文件；记录尝试序号、返回码及实际诊断。验证失败时不交付，不将保留下来的旧文件当作本次成功结果。
+2. **按诊断判断能否修正。** 仅修正有明确依据且不改变用户意图的输入或调用错误，例如 JSON 语法、可确认的字段拼写、调用参数，或使用用户已提供的值补齐占位符。只更正当前任务内可核实的资源引用，不猜测路径、缺失内容或格式意图。遇到环境/写入异常、安全校验失败、资源超限、不支持的功能、信息不足，或正确输入仍触发内容/排版意图不一致时，停止并报告原因；不得以重试替代环境修复或 Skill 维护。
+3. **修正后有限重试。** 首次尝试之外最多重试 2 次，即同一生成任务最多调用生成器 3 次。每次须先完成针对诊断的具体修正并记录改动；禁止原样重复执行、换文件名或路径重置计数。修正后同一错误再次出现、无法确定下一步修正，或两次重试均失败时停止，说明失败位置及需要补充的信息。
+4. **重新完整验收。** 每次重试都重新执行集成验收，不能沿用上次结果。禁止关闭校验、忽略警告、放宽安全限额、删减用户内容或在普通文档任务中修改生成器/验收器来获得通过。仅在本次生成成功且验收通过后，再核实目标存在、非空及交付链接；已完成的集成检查无需重复运行独立 CRC/结构/文本回读命令。
+5. **据实交付。** 成功时简述实际检查结果；发生过重试时说明重试次数和修正项。失败时保留原始材料与已有输出，报告已尝试次数、最后诊断和未完成项，不返回失败产物或冒充本次产物的旧文件。执行记录不写入文档正文，不声称已完成视觉或 XSD 验证。
 
 ## 维护资源
 

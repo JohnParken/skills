@@ -78,6 +78,28 @@ class ArchiveSecurityTests(unittest.TestCase):
                 self.assertEqual(output.read_bytes(), b"keep existing output")
                 self.assertFalse(list(self.work.glob("output.docx.*.tmp")))
 
+    def test_pack_rejects_existing_and_dangling_output_symlinks(self):
+        directory = unpack_document(self.source, self.work / "package")
+        for packer in (pack_document, helpers.rezip):
+            for existing in (True, False):
+                with self.subTest(packer=packer.__name__, existing=existing):
+                    target = self.work / f"unrelated-{packer.__name__}-{existing}.docx"
+                    if existing:
+                        target.write_bytes(b"keep target")
+                    output = self.work / f"linked-{packer.__name__}-{existing}.docx"
+                    output.symlink_to(target)
+                    before = set(self.work.iterdir())
+                    with self.assertRaisesRegex(ValueError, "[Ss]ymbolic link"):
+                        packer(directory, output)
+                    self.assertTrue(output.is_symlink())
+                    self.assertEqual(set(self.work.iterdir()), before)
+                    if existing:
+                        self.assertEqual(target.read_bytes(), b"keep target")
+                        target.unlink()
+                    else:
+                        self.assertFalse(target.exists())
+                    output.unlink()
+
     def test_repack_detects_case_aliases_even_on_case_sensitive_hosts(self):
         directory = unpack_document(self.source, self.work / "package")
         # Directory spelling aliases are represented as mocked ZIP metadata so

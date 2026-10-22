@@ -49,10 +49,12 @@
 
 先按 [执行环境约束](../SKILL.md#执行环境约束与首步自检) 完成定位及自检，再从下载工作目录调用脚本。下文仅在已核实 skill 相对位置为 `docx` 时适用；修改前保留源文件，完成后执行基础检查，禁止为照抄示例切换目录：
 
+压缩文档输入必须显式指定 `-o` 输出新文件；禁止与输入同路径或通过符号链接、硬链接指向输入。目录入口仍就地修改工作副本，且不接受 `-o`；先保留原目录再操作。`comment.py` 默认作者为 `Editor`、缩写为 `E`，按需用 `--author` 和 `--initials` 指定真实作者。
+
 ```console
 python -I -S -B docx/scripts/comment.py ./input.docx "核对费用上限" -o ./annotated.docx
 python -I -S -B docx/scripts/merge_runs.py ./input.docx -o ./merged.docx
-python -I -S -B docx/scripts/office/validate.py ./edited.docx --original ./input.docx --author Editor
+python -I -S -B docx/scripts/office/validate.py ./edited.docx --original ./input.docx
 ```
 
 添加批注定义后，先补正文锚点再验收。当前基础检查仅支持有起点、终点和引用的范围批注，不支持无范围的点批注，也不验证完整线程回复语义；不要把生成批注部件声称为已验证阅读器中的显示效果。
@@ -62,3 +64,5 @@ python -I -S -B docx/scripts/office/validate.py ./edited.docx --original ./input
 保留命名空间声明、元素顺序、关系引用和 `xml:space`；禁止重新排版整个 XML 或删除未知扩展。使用 `scripts/office/xmlio.py` 中的受限解析入口，不要直接用默认解析器处理外来 XML。
 
 修订对比仅比较正文文字及有限的插入/删除标记，不检查所有格式、段落合并、移动、页眉页脚、字段、制表符或换行语义。指定 `--original` 不会豁免结构错误，校验器不提供自动修复或 XSD 检查。
+
+指定 `--original` 即在结构检查通过后执行修订文本对比；发现未追踪文字修改时返回非零退出码。旧 `--author` 参数仅保留调用兼容性，仍要求 `--original`，其值不筛选修订作者；不要将它解释为特定作者的修订验收。
