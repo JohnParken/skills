@@ -2,10 +2,10 @@
 
 ## 结构化 JSON
 
-先完成技能入口要求的环境自检。从已确认的文档工作目录执行；将示例 `docx/` 替换为实际技能相对位置：
+先完成技能入口要求的环境自检。从已确认的文档工作目录执行；将示例 `<skill_dir>` 替换为主入口定义的真实目录：
 
 ```console
-python -I -S -B docx/scripts/read_docx.py ./input.docx --format json --revisions all --include-related -o ./structure.json
+python -I -S -B "<skill_dir>/scripts/read_docx.py" ./input.docx --format json --revisions all --include-related -o ./structure.json
 ```
 
 使用 Python API `read_docx_structure(path, revisions="accepted", include_related=False)` 获取字典。默认 CLI 和 `read_docx()` 仍返回纯文本。
@@ -36,7 +36,7 @@ JSON 顶层契约为 `schema_version: 1`、`format: "docx-structure"`：
 ## 进阶检查范围
 
 ```console
-python -I -S -B docx/scripts/office/validate.py ./input.docx
+python -I -S -B "<skill_dir>/scripts/office/validate.py" ./input.docx
 ```
 
 同一校验入口执行基础规则和以下显式结构约束；错误报告部件、表格/行/单元格或编号 ID/层级位置：

@@ -1,9 +1,9 @@
 # 批注事务管理
 
-先执行技能入口要求的自检。从文档工作目录调用；按真实技能位置调整 `docx/`。本入口不依赖旧 `comment.py` 的手工补锚点流程，每次只接受一个动作。
+先执行技能入口要求的自检。从文档工作目录调用；将 `<skill_dir>` 替换为主入口定义的真实目录。本入口不依赖旧 `comment.py` 的手工补锚点流程，每次只接受一个动作。
 
 ```console
-python -I -S -B docx/scripts/manage_comments.py ./input.docx ./action.json ./edited.docx
+python -I -S -B "<skill_dir>/scripts/manage_comments.py" ./input.docx ./action.json ./edited.docx
 ```
 
 使用 `manage_comments(source, specification, destination=None)` 获取动作结果字典。变更必须输出同扩展名的新 DOCX/DOTX，禁止输入别名、链接输出或数字签名包；先在副本中规划，检查结构、线程元数据和 XML 值保真后原子打包。失败保留源及已有输出。
@@ -19,7 +19,7 @@ python -I -S -B docx/scripts/manage_comments.py ./input.docx ./action.json ./edi
 查询不提供输出文档参数，结果写到标准输出：
 
 ```console
-python -I -S -B docx/scripts/manage_comments.py ./input.docx ./action.json
+python -I -S -B "<skill_dir>/scripts/manage_comments.py" ./input.docx ./action.json
 ```
 
 返回 `mode`（`none/classic/modern`）、`mutable`、`diagnostics` 及已读取批注的 `id/text/author/parent_id/paragraph_index`。`mutable` 仅说明支持的修改子集可用，不表示所有动作均可执行。审阅诊断；未知或损坏元数据不等于完整查询成功，无法安全解析的 XML 会直接失败。
@@ -68,4 +68,4 @@ python -I -S -B docx/scripts/manage_comments.py ./input.docx ./action.json
 
 含复杂文字、多个段落、表格内或页眉页脚批注、未知扩展、额外人员/云元数据或非标准依赖时，查询会报告诊断，修改拒绝。未知非目标 ZIP 部件保持字节不变；这不是任意已有批注的无损编辑器。
 
-完成后重新查询并运行 `scripts/office/validate.py`，核对目标批注和正文范围，核对非目标 XML 值及部件字节。基础校验器不代替本入口的四部件元数据检查；以上均不等同于 XSD、真实 Word/WPS 或视觉验收。
+完成后重新查询并运行 `<skill_dir>/scripts/office/validate.py`，核对目标批注和正文范围，核对非目标 XML 值及部件字节。基础校验器不代替本入口的四部件元数据检查；以上均不等同于 XSD、真实 Word/WPS 或视觉验收。

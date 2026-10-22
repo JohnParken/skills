@@ -1,10 +1,10 @@
 # 受控结构编辑输入约定
 
-先执行技能入口要求的自检，保留输入文件，从确认的文档工作目录执行：
+先执行技能入口要求的自检，保留输入文件，从确认的文档工作目录执行；将 `<skill_dir>` 替换为主入口定义的真实目录：
 
 ```console
-python -I -S -B docx/scripts/edit_structure.py ./input.docx ./operations.json ./edited.docx
-python -I -S -B docx/scripts/office/validate.py ./edited.docx
+python -I -S -B "<skill_dir>/scripts/edit_structure.py" ./input.docx ./operations.json ./edited.docx
+python -I -S -B "<skill_dir>/scripts/office/validate.py" ./edited.docx
 ```
 
 顶层只接受非空 `operations` 列表。各操作按原始 XML 定位，全部验证通过后才应用。`paragraph_index` 从 0 开始，只计算 `w:body` 的直属 `w:p`，不计表格或容器内段落；`run_index` 从 0 开始，计算锚点段落的直属 `w:r`。同时提供完全一致的 `expected_text`，run 格式修改另提供 `expected_run_text`，避免索引漂移时改错内容。

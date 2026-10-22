@@ -15,32 +15,32 @@ description: 用于新建 Word 公文、报告和信函，支持可定制排版�
 - 使用 Python 3.10 及以上版本，要求标准库包含 zlib，且内置 XML 解析器 Expat 版本至少为 2.6.0；解析器不满足条件时报告环境受阻。
 - 仅使用 Python 标准库；不要安装或导入第三方包，不要调用办公软件、转换器、Shell 命令、Git 或编译器。
 - 在宿主提供的可下载工作目录执行，使用宿主已确认可用的 Python 解释器；下文的 `python` 仅表示该入口。使用 `-I -S -B` 禁用环境路径、site 初始化及缓存写入；脚本只添加自身所在的源码目录以加载本 skill 模块。
-- 将输入、输出及任务临时文件放在当前下载工作目录，使用 `./document.json`、`./output.docx` 等相对路径。禁止将任务文件写入 skill 源码目录。
+- 将输入、输出及任务临时文件放在当前下载工作目录，使用 `./document.json`、`./output.docx` 等相对路径。禁止将任务文件写入 skill 源码目录。创建辅助文件前记录本次新建的确切路径及用途，任务结束按 [任务中间文件清理](#任务中间文件清理) 收尾。
 - 按 [requirements.txt](requirements.txt) 确认无第三方运行时依赖；无需运行包安装命令。
 - 生成 DOCX；仅使用 ZIP/XML 工具读取、定点编辑和检查已有 DOTX。禁止通过改扩展名转换格式。
 
 | 任务 | 使用方式与边界 |
 |---|---|
-| 生成公文、报告、信函 | 使用 `scripts/create_docx.py`；支持默认公文格式、显式样式覆盖、单节页面、四级标题、普通段落、简单列表、规则表格、现成 PNG/JPEG、页眉页脚和页码字段。 |
-| 修改文字或填充模板 | 使用 `scripts/edit_docx.py`；明确指定搜索文字、替换值和预期次数，仅修改普通文本节点。 |
-| 受控结构编辑 | 使用 `scripts/edit_structure.py`；仅支持经索引及原文核验的正文直属普通段落插入、普通 run 局部格式修改。 |
-| 表格行增删与图片替换 | 使用 `scripts/edit_tables.py` 或 `scripts/replace_image.py`；前者仅编辑规则纯文本数据行，后者仅替换显式选定的同格式媒体部件。 |
-| 批注管理 | 使用 `scripts/manage_comments.py`；查询及严格子集的文字自动锚定、修改、删除、一级回复，拒绝歧义或未知线程语义。 |
-| 读取内容 | 使用 `scripts/read_docx.py`；默认纯文本，可用 `--format json` 读取显式结构；不计算继承样式、列表显示值或页面布局。 |
-| 结构检查 | 使用 `scripts/office/validate.py`；包含基础规则及表格合并/编号层级的进阶子集，禁止声称已通过完整 OOXML/XSD 校验。 |
+| 生成公文、报告、信函 | 使用 `<skill_dir>/scripts/create_docx.py`；支持默认公文格式、显式样式覆盖、单节页面、四级标题、普通段落、简单列表、规则表格、现成 PNG/JPEG、页眉页脚和页码字段。 |
+| 修改文字或填充模板 | 使用 `<skill_dir>/scripts/edit_docx.py`；明确指定搜索文字、替换值和预期次数，仅修改普通文本节点。 |
+| 受控结构编辑 | 使用 `<skill_dir>/scripts/edit_structure.py`；仅支持经索引及原文核验的正文直属普通段落插入、普通 run 局部格式修改。 |
+| 表格行增删与图片替换 | 使用 `<skill_dir>/scripts/edit_tables.py` 或 `<skill_dir>/scripts/replace_image.py`；前者仅编辑规则纯文本数据行，后者仅替换显式选定的同格式媒体部件。 |
+| 批注管理 | 使用 `<skill_dir>/scripts/manage_comments.py`；查询及严格子集的文字自动锚定、修改、删除、一级回复，拒绝歧义或未知线程语义。 |
+| 读取内容 | 使用 `<skill_dir>/scripts/read_docx.py`；默认纯文本，可用 `--format json` 读取显式结构；不计算继承样式、列表显示值或页面布局。 |
+| 结构检查 | 使用 `<skill_dir>/scripts/office/validate.py`；包含基础规则及表格合并/编号层级的进阶子集，禁止声称已通过完整 OOXML/XSD 校验。 |
 | 高级 XML 操作 | 仅在目标结构已明确时使用打包、批注和 run 辅助脚本；不要承诺任意复杂文档无损编辑。 |
 
 ## 执行环境约束与首步自检
 
-1. 保持宿主执行工具的当前工作目录不变。文件读取、写入和执行参数均使用相对路径；将任务数据限制在当前下载工作目录及其子目录，禁止用父目录路径写出该目录，禁止使用绝对路径或另选临时目录规避下载限制。脚本定位仍以真实 skill 位置为准。若当前目录是 skill 源码目录，应先由宿主明确任务工作目录，不要直接在源码目录生成文件。
-2. 以实际读取本 `SKILL.md` 时的 `file_path` 去掉末尾文件名，确定 skill 的真实位置，再依据宿主已确认的工作目录信息推导脚本相对路径。禁止照抄其他会话、示例或机器上的路径；不得用工作目录打印结果或环境变量回显猜测真实路径。若读取结果只给出掩码而无法确定可访问的相对路径，报告无法定位，不要拼接掩码执行。
-3. 将尖括号包裹的工作区、临时目录、技能根目录等掩码视为不可执行的显示文本；禁止将这些文本拼入文件参数、命令或最终回复。不要用掩码构造下载地址。
-4. 使用实际存在的 `scripts/create_docx.py`，不要调用不存在的报告脚本或假设存在虚拟环境。当前实现只需标准库，不依赖 `docx` 模块；不要照搬其他技能对系统 Python 的禁用规则，也不要安装包。首次运行必须先执行下面的自检；本节优先于生成及编辑示例。
+1. 在宿主确认的任务工作目录执行。输入、输出及任务临时文件使用基于该目录的相对路径，将任务数据限制在该目录及其子目录；禁止用绝对路径、父目录路径或另选临时目录规避任务数据边界。脚本及内部资源使用下述 `<skill_dir>` 定位，可使用已确认的绝对路径，不受任务数据相对路径要求限制。若当前目录是 skill 源码目录，先由宿主明确任务工作目录；不要在源码目录生成任务文件，也不要为了照抄示例切换到源码目录。
+2. 以实际读取本 `SKILL.md` 时的 `file_path` 去掉末尾文件名，确定 skill 的真实位置，记作 `<skill_dir>`。若 `file_path` 为相对路径，依据本次读取时已确认的基准目录解析真实位置。脚本、参考资料、静态资源和依赖清单分别从 `<skill_dir>/scripts/`、`<skill_dir>/references/`、`<skill_dir>/assets/` 和 `<skill_dir>/requirements.txt` 定位，不假定任务目录下存在 `scripts/` 或 `docx/`。禁止照抄其他会话、示例或机器上的路径；不得用工作目录打印结果或环境变量回显猜测真实路径。无法确定可访问的真实位置时报告无法定位，不猜测或拼接路径。
+3. `<skill_dir>` 是本文定义的路径占位符，不是 Shell 变量，也不是可原样执行的文本。读取资源或执行命令前，必须替换为上一步确认的真实目录；命令中的路径作为一个完整参数传递，保留正确引用以支持空格。宿主返回的尖括号路径掩码不提供真实路径信息，禁止把掩码当成 `<skill_dir>` 的值或拼入执行参数。不要用占位符或掩码构造交付链接。
+4. 使用实际存在的 `<skill_dir>/scripts/create_docx.py`，不要调用不存在的报告脚本或假设存在虚拟环境。当前实现只需标准库，不依赖 `docx` 模块；不要照搬其他技能对系统 Python 的禁用规则，也不要安装包。首次运行必须先执行下面的自检；本节优先于生成及编辑示例。
 
-下文保留当前已确认的 `scripts/` 脚本入口，包括自检命令 `scripts/create_docx.py --check`；不要额外添加 `docx/` 前缀。由宿主确认脚本可访问性；不要为了照抄命令切换工作目录。Markdown 资源链接仍以本 skill 为基准。
+下文命令均在任务工作目录执行，脚本路径中的 `<skill_dir>` 须先替换为已确认的真实目录。Markdown 资源链接保留相对于所在 Markdown 文件的写法：本入口的 `references/`、`assets/` 和 `requirements.txt` 均位于 `<skill_dir>` 下；引用说明中的同级链接相对于 `<skill_dir>/references/`，`../SKILL.md` 指向 `<skill_dir>/SKILL.md`。读取链接目标时按此基准解析，不以任务工作目录查找内部资源。
 
 ```console
-python -I -S -B scripts/create_docx.py --check
+python -I -S -B "<skill_dir>/scripts/create_docx.py" --check
 ```
 
 - 仅在返回码为 0 且输出包含 `check-ok`、`output_dir=. writable=True` 时继续。自检逐项显示 Python、zlib、Expat 的实际版本或状态及要求，并在当前目录实际写入、读回和清理探针文件；不生成报告。失败时根据具体失败项报告，不猜测版本或安装路径。
@@ -62,6 +62,7 @@ python -I -S -B scripts/create_docx.py --check
 | 西文 | Times New Roman。 |
 | 页面 | A4 纵向；上下边距 2.54cm，左右边距 3.18cm。 |
 
+- 一至四级章节标题必须使用 `type: "heading"` 与对应的 `level: 1` 至 `4`，段落分别引用 `Heading1`、`Heading2`、`Heading3`、`Heading4`；对应样式的 `w:outlineLvl` 分别为 `0`、`1`、`2`、`3`（从 0 计数）。此要求适用于所有主题和显式格式覆盖；禁止用 `paragraph` / `BodyText` 仅修改字体、字号或加粗来模拟标题。标题样式的 `basedOn="Normal"` 只表示继承基础属性，不取消标题身份；预定义但未被段落引用的样式不算已应用。
 - 使用零段前、段后间距；标题不缩进，默认使用 1.15 倍行距。为表格使用独立样式；列表、图片段落和页眉页脚沿用基础字体，避免套用正文的首行缩进和固定行距；保留列表自身的编号缩进。
 - 上述为默认公文主题。商务、学术主题的页眉页脚使用独立 `Header`、`Footer` 段落样式，字体分别为微软雅黑 / Calibri、宋体 / Times New Roman，均为 10.5pt、1.25 倍行距、黑色、不加粗、左对齐、无首行缩进、段前段后为 0；页码字段结果继承同一样式。正文的 `styles.body` 覆盖不影响页眉页脚。公文主题保留原有基础样式行为。
 - 使用顶层 `styles.body`、`styles.heading1` 至 `styles.heading4` 覆盖整类样式；使用段落或标题的 `format` 覆盖单个块，使用 `runs` 中的字符字段覆盖局部文字。保留旧的 `align`、run `font` 和 `page.margin_mm` 用法；具体字段、优先级和示例见 [生成器输入约定](references/generation.md)。
@@ -148,10 +149,10 @@ python -I -S -B scripts/create_docx.py --check
 ```
 
 ```console
-python -I -S -B scripts/create_docx.py ./document.json ./output.docx --verify --require-no-placeholders
+python -I -S -B "<skill_dir>/scripts/create_docx.py" ./document.json ./output.docx --verify --require-no-placeholders
 ```
 
-生成器始终在写出前检查生成 XML 的共享资源预算。生成交付使用 `--verify` 在原子替换最终文件前读回 ZIP、检查全部成员 CRC、结构规则、输入内容及已支持的排版意图；`--require-no-placeholders` 同时开启验证并拒绝双花括号标记。按 [集成验收范围](references/generation.md#预检与集成验收) 核对块顺序、分页、样式、列表、表格和图片对应关系。失败保留已有输出并清理暂存文件，按文末 [生成失败修正与有限重试](#生成失败修正与有限重试) 处理；成功摘要中的 `layout_intent: true` 不代表视觉或 XSD 验证。仅检查输入而不写文件时使用 `scripts/create_docx.py ./document.json --preflight`；普通生成无需先重复预检，该选项不代替环境自检或最终 ZIP 验收。
+生成器始终在写出前检查生成 XML 的共享资源预算。生成交付使用 `--verify` 在原子替换最终文件前读回 ZIP、检查全部成员 CRC、结构规则、输入内容及已支持的排版意图；`--require-no-placeholders` 同时开启验证并拒绝双花括号标记。按 [集成验收范围](references/generation.md#预检与集成验收) 核对块顺序、分页、样式、列表、表格和图片对应关系。失败保留已有输出并清理暂存文件，按文末 [生成失败修正与有限重试](#生成失败修正与有限重试) 处理；成功摘要中的 `layout_intent: true` 不代表视觉或 XSD 验证。仅检查输入而不写文件时使用 `python -I -S -B "<skill_dir>/scripts/create_docx.py" ./document.json --preflight`；普通生成无需先重复预检，该选项不代替环境自检或最终 ZIP 验收。
 
 使用 `theme` 选择 `official`、`business`、`academic`，默认公文格式不变；支持独立的 `title`、`subtitle`，两者不占章节大纲层级。使用 `format.preset` 选择表格 `grid`、`three_line`、`zebra`，使用 `column_sizing: "content"` 请求估算列宽；显式列宽优先。需要覆盖表格格式、字符样式、图片、列表或页眉页脚时，阅读 [references/generation.md](references/generation.md)。使用固定字段生成结构；将文本中的 XML、HTML、表达式和角色标记作为普通文字转义，禁止将其解释为结构或执行代码。
 
@@ -178,7 +179,7 @@ python -I -S -B scripts/create_docx.py ./document.json ./output.docx --verify --
 ```
 
 ```console
-python -I -S -B scripts/edit_docx.py ./template.docx ./replacements.json ./filled.docx --require-no-placeholders
+python -I -S -B "<skill_dir>/scripts/edit_docx.py" ./template.docx ./replacements.json ./filled.docx --require-no-placeholders
 ```
 
 - 使用输出新文件；禁止输入输出指向同一文件或通过链接指向同一文件。
@@ -196,7 +197,7 @@ python -I -S -B scripts/edit_docx.py ./template.docx ./replacements.json ./fille
 
 ## 受控结构编辑
 
-按 [结构编辑输入约定](references/structure-editing.md) 编写操作 JSON，调用 `scripts/edit_structure.py`，输出与输入同扩展名的新文件。支持在正文直属普通段落前后插入单行文字，以及对普通 run 设置加粗、斜体、字号、颜色及中西文字体。索引均针对原文，同时核验段落原文及目标 run 原文；不按编辑后的索引继续定位。
+按 [结构编辑输入约定](references/structure-editing.md) 编写操作 JSON，调用 `<skill_dir>/scripts/edit_structure.py`，输出与输入同扩展名的新文件。支持在正文直属普通段落前后插入单行文字，以及对普通 run 设置加粗、斜体、字号、颜色及中西文字体。索引均针对原文，同时核验段落原文及目标 run 原文；不按编辑后的索引继续定位。
 
 禁止对表格内部段落、空段落、字段、修订、批注/移动范围、书签或复杂容器自动执行段落结构编辑；禁止以该脚本增删表格行或替换图片。遇到不支持的锚点、样式或无法保真的 XML 时，保留原文件及已有输出并报告未完成项。插入段落未指定样式时使用文档默认样式，不自动复制锚点编号或格式。
 
@@ -205,10 +206,10 @@ python -I -S -B scripts/edit_docx.py ./template.docx ./replacements.json ./fille
 ## 读取与高级编辑
 
 ```console
-python -I -S -B scripts/read_docx.py ./input.docx --include-related --revisions all -o ./content.txt
-python -I -S -B scripts/read_docx.py ./input.docx --format json --include-related --revisions all -o ./structure.json
-python -I -S -B scripts/office/package.py unpack ./input.docx ./unpacked
-python -I -S -B scripts/office/package.py pack ./unpacked ./edited.docx
+python -I -S -B "<skill_dir>/scripts/read_docx.py" ./input.docx --include-related --revisions all -o ./content.txt
+python -I -S -B "<skill_dir>/scripts/read_docx.py" ./input.docx --format json --include-related --revisions all -o ./structure.json
+python -I -S -B "<skill_dir>/scripts/office/package.py" unpack ./input.docx ./unpacked
+python -I -S -B "<skill_dir>/scripts/office/package.py" pack ./unpacked ./edited.docx
 ```
 
 按正文顺序读取段落、超链接文字、制表符、换行和嵌套表格；表格列以制表符分隔。使用 `--include-related` 在正文后追加带标签的页眉、页脚、脚注、尾注和批注；不要将追加顺序当作页面顺序。
@@ -245,14 +246,14 @@ print(f"./{output.as_posix()} exists=True size={output.stat().st_size} zip-ok")
 禁止用其他目录中的同名文件代替该目标；验证失败时停止本次交付，新建文档仅可按下述有限重试规则修正后重新验收。无法修正时报告实际失败。以上步骤不替代下列结构检查：
 
 ```console
-python -I -S -B scripts/office/validate.py ./output.docx --require-no-placeholders
-python -I -S -B scripts/read_docx.py ./output.docx --include-related -o ./checked-content.txt
+python -I -S -B "<skill_dir>/scripts/office/validate.py" ./output.docx --require-no-placeholders
+python -I -S -B "<skill_dir>/scripts/read_docx.py" ./output.docx --include-related -o ./checked-content.txt
 ```
 
 1. 核对 ZIP 完整性与必需部件；解包脚本会读取成员并检查 CRC、路径和重复名称。单独使用 `zipfile.testzip()` 时确认返回 `None`。
 2. 运行结构检查并根据非零退出码定位问题；仅在已授权且可确定的范围内修正，新建文档遵循下述重试规则。检查 XML 可解析性、必需根节点、内容类型覆盖、内部关系目标与引用、样式/编号引用、范围批注锚点及修订的基本 ID/作者属性；同时检查显式表格跨度、纵向合并连续性及编号层级/覆盖/重启的已实现规则。按 [检查范围](references/inspection.md#进阶检查范围) 审阅带位置的错误及 `unverified` 警告；警告不是该能力已通过验收，不得静默忽略。
 3. 对照输入核对文字、表格、图片引用和未填充占位符，确认中文、英文及正文引号原样保留。对提取器不覆盖的内容检查相应 XML；不要把成功解压或解析当作 Word 实际打开验证。
-4. 生成时对照输入核对 `word/styles.xml` 和 `word/document.xml` 中的样式引用、字体、字号、缩进、行距及页面尺寸；未显式覆盖时核对默认公文格式，显式覆盖时按实际优先级核对。对表格额外核对独立正文/表头样式、边框、留白、垂直对齐、底色及重复表头/避免拆行标记；默认不得写入固定行高。基础结构校验器不会替代这些排版值检查，也不能验证字体存在或页面显示效果。
+4. 生成时对照输入核对 `word/styles.xml` 和 `word/document.xml` 中的样式引用、字体、字号、缩进、行距及页面尺寸；未显式覆盖时核对默认公文格式，显式覆盖时按实际优先级核对。先对照用户要求的章节结构，确认标题文字、顺序、数量及层级已正确写入生成输入，再逐段核对实际 `w:pStyle` 为对应的 `Heading1` 至 `Heading4`，且引用样式的 `w:outlineLvl` 为 `level - 1`；仅有字体差异或样式定义存在不能通过标题验收。`--verify` 已按生成输入检查标题样式引用和大纲级别，但不能判断被误写为 `paragraph` 的文字是否原本应是标题；该输入语义核对不得省略。对表格额外核对独立正文/表头样式、边框、留白、垂直对齐、底色及重复表头/避免拆行标记；默认不得写入固定行高。基础结构校验器不会替代这些排版值检查，也不能验证字体存在或页面显示效果。
 5. 编辑时核对未修改部件的内容字节；检查失败时保留原始文档和已有输出。禁止跳过失败后报告完成。
 6. 仅报告实际执行的检查。不要声称已验证完整元素顺序、所有 OOXML 扩展、图片解码、修订语义、字体或页面布局。
 7. 按需求、操作、验证顺序执行；交付时仅提供简要依据和实测结果。需要事实或引用时依据用户材料或已核实来源，禁止为补全内容编造来源。
@@ -273,13 +274,23 @@ python -I -S -B scripts/read_docx.py ./output.docx --include-related -o ./checke
 2. **按诊断判断能否修正。** 仅修正有明确依据且不改变用户意图的输入或调用错误，例如 JSON 语法、可确认的字段拼写、调用参数，或使用用户已提供的值补齐占位符。只更正当前任务内可核实的资源引用，不猜测路径、缺失内容或格式意图。遇到环境/写入异常、安全校验失败、资源超限、不支持的功能、信息不足，或正确输入仍触发内容/排版意图不一致时，停止并报告原因；不得以重试替代环境修复或 Skill 维护。
 3. **修正后有限重试。** 首次尝试之外最多重试 2 次，即同一生成任务最多调用生成器 3 次。每次须先完成针对诊断的具体修正并记录改动；禁止原样重复执行、换文件名或路径重置计数。修正后同一错误再次出现、无法确定下一步修正，或两次重试均失败时停止，说明失败位置及需要补充的信息。
 4. **重新完整验收。** 每次重试都重新执行集成验收，不能沿用上次结果。禁止关闭校验、忽略警告、放宽安全限额、删减用户内容或在普通文档任务中修改生成器/验收器来获得通过。仅在本次生成成功且验收通过后，再核实目标存在、非空及交付链接；已完成的集成检查无需重复运行独立 CRC/结构/文本回读命令。
-5. **据实交付。** 成功时简述实际检查结果；发生过重试时说明重试次数和修正项。失败时保留原始材料与已有输出，报告已尝试次数、最后诊断和未完成项，不返回失败产物或冒充本次产物的旧文件。执行记录不写入文档正文，不声称已完成视觉或 XSD 验证。
+5. **据实交付。** 成功时简述实际检查结果；发生过重试时说明重试次数和修正项。失败时保留原始材料与已有输出，报告已尝试次数、最后诊断和未完成项，不返回失败产物或冒充本次产物的旧文件。成功或终止重试后均按下节清理本次中间文件。执行记录不写入文档正文，不声称已完成视觉或 XSD 验证。
+
+### 任务中间文件清理
+
+由执行本 Skill 的助手负责生成、编辑和检查任务的收尾清理；脚本自身的暂存文件清理不等于整个任务的清理，也不会自动删除调用方的 JSON 或脚本。
+
+1. **记录归属。** 创建前记录本次新建且此前不存在的中间文件、目录的确切相对路径及用途。工作副本和解包目录使用当前任务目录内新建的独立子目录，不复用已有目录。不得把用户上传的原件、模板、图片、用户提供的 JSON、已有输出或其他任务文件列为可清理项；文件名相同或扩展名相同不能证明归属。无法确认本次创建的文件应保留。
+2. **成功后清理。** 完成全部生成、编辑及结果验收后，交付前删除清单内已无后续用途的中间文件，包括助手生成的输入 JSON、替换规则、临时 Python 脚本、仅供验收的文本/结构回读结果、日志、临时图片、解包工作副本及未选用的中间 DOCX。保留最终交付文件，以及用户明确要求的源码、JSON、日志或其他辅助产物；不得删除交付文件依赖的外部资源。
+3. **重试及失败收尾。** 仍在重试或等待必要输入时，保留继续执行所需的材料。任务最终失败或停止时，清理本次产生且不再需要的中间文件；仅保留定位或恢复必需的最少材料并说明用途及位置。始终保留用户原始材料、已有输出，以及尚未确认恢复完成的事务备份；禁止将恢复备份当作普通临时目录删除。
+4. **按清单删除。** 使用 Python 标准库逐项处理已确认归属的路径，不使用 Shell 清理命令、通配符或全目录扫描批量删除。限制在已确认的任务目录内，不跟随符号链接；清理路径或其父级出现链接、类型变化或归属不明时保留并报告。目录仅在已知文件清理后确认为空时删除，禁止递归删除可能混入其他文件的目录。已不存在的清单项可跳过。
+5. **核实收尾。** 清理后再次确认最终交付文件存在、非空且链接仍指向该文件；仅在文件未变化时复用已有验收结果。遇到权限或占用导致无法清理时，不扩大删除范围，不为清理而重新生成文档；据实说明未清理项和原因，不声称已全部清理。清理记录不写入文档正文。
 
 ## 维护资源
 
 处理不可信输入或维护安全逻辑时，按 [安全边界与验收](references/security.md) 核对威胁模型、资源门禁、归档兼容范围及写入保护。不要将结构检查当作主动内容清洗或阅读器安全认证。
 
-保留 `assets/comments/` 中的 `comments.xml`、`commentsExtended.xml`、`commentsIds.xml` 和 `commentsExtensible.xml`。使用相对资源路径；禁止硬编码开发者目录或把 XML 命名空间 URI 当成需要访问的网络资源。
+保留 `<skill_dir>/assets/comments/` 中的 `comments.xml`、`commentsExtended.xml`、`commentsIds.xml` 和 `commentsExtensible.xml`。内部资源从 `<skill_dir>` 定位，Markdown 链接按上述基准解析；禁止硬编码开发者目录或把 XML 命名空间 URI 当成需要访问的网络资源。
 
 禁止在 skill 中留下临时文档、日志、缓存、测试产物、README 或多版本脚本。仅将确需复用的模板和参考材料分别整理到 assets/ 和 references/；不要把临时产物改放这些目录充当资源。维护时使用标准库 unittest 在第三方包不可见且可执行程序搜索路径为空的环境中验证；将测试产物放在独立临时目录。
 

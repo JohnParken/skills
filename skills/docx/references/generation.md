@@ -12,15 +12,15 @@
 - [显式覆盖示例](#显式覆盖示例)
 - [中文 JSON 与引号](#中文-json-与引号)
 
-先按 [执行环境约束](../SKILL.md#执行环境约束与首步自检) 定位脚本并完成自检。在宿主的下载工作目录调用生成器，输入输出使用 `./document.json`、`./output.docx` 等相对路径；不要切换到 skill 源码目录。脚本路径使用已核实的 skill 相对位置，禁止拼接掩码。相对图片路径以输入 JSON 所在目录为基准。需要 Python API 时调用 `create_document(spec, output, base_dir=None, verify=True, require_no_placeholders=False)`，同样使用相对文件参数。禁止传入未声明的字段，生成器会拒绝未知字段、错误类型和不支持的块。
+先按 [执行环境约束](../SKILL.md#执行环境约束与首步自检) 定位脚本并完成自检。在宿主的下载工作目录调用生成器，输入输出使用 `./document.json`、`./output.docx` 等相对路径；不要切换到 skill 源码目录。脚本和内部资源均基于入口定义的 `<skill_dir>` 定位，执行前替换为真实目录。相对图片路径以输入 JSON 所在目录为基准。需要 Python API 时调用 `create_document(spec, output, base_dir=None, verify=True, require_no_placeholders=False)`，输入输出及 `base_dir` 同样使用任务目录内的相对路径；API 模块从 `<skill_dir>/scripts/` 加载。禁止传入未声明的字段，生成器会拒绝未知字段、错误类型和不支持的块。
 
 ## 预检与集成验收
 
-保留自检入口 `scripts/create_docx.py --check`，不要加 `docx/` 前缀。完成环境自检后，使用以下相对入口；输入输出位于任务目录：
+先按主入口执行环境自检。以下命令中的 `<skill_dir>` 替换为已确认的真实目录；输入输出位于任务工作目录：
 
 ```console
-python -I -S -B scripts/create_docx.py ./document.json --preflight
-python -I -S -B scripts/create_docx.py ./document.json ./output.docx --verify --require-no-placeholders
+python -I -S -B "<skill_dir>/scripts/create_docx.py" ./document.json --preflight
+python -I -S -B "<skill_dir>/scripts/create_docx.py" ./document.json ./output.docx --verify --require-no-placeholders
 ```
 
 `--preflight` 只接受输入路径，检查字段、图片引用、生成 XML 和共享预算，不写文档或执行写入探针；不是结构或视觉验收。以上两条为可选路径：普通生成直接用第二条，无需先重复预检。`--verify` 在临时 ZIP 写完后读取全部成员并检查 CRC、结构及正文文字序列、表格/图片数量、页眉页脚文字，再按输入核对排版意图：块顺序与分页符、标题样式与大纲、列表实例/层级/编号定义、样式及显式文字格式、页面尺寸/边距、表格行列/网格宽度/单元格内容归属/边框/留白/跨页标记、图片显示尺寸/替代文字及引用媒体的 SHA-256。通过后原子发布输出，失败保留已有输出。`--require-no-placeholders` 隐含开启验收，检查跨 run 的双花括号标记；正文需要字面花括号时省略该参数。验收遇到未验证警告同样拒绝发布。成功摘要增加 `layout_intent: true`；这是生成子集的输入与 XML 对照，不计算页码，不做 XSD、字体可用性或视觉验证。

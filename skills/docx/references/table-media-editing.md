@@ -4,10 +4,10 @@
 
 ## 规则表格数据行
 
-从文档工作目录执行，按实际技能相对位置调整 `docx/`：
+从文档工作目录执行，将 `<skill_dir>` 替换为主入口定义的真实目录：
 
 ```console
-python -I -S -B docx/scripts/edit_tables.py ./input.docx ./row.json ./edited.docx
+python -I -S -B "<skill_dir>/scripts/edit_tables.py" ./input.docx ./row.json ./edited.docx
 ```
 
 每次只接受一个 `operation`。索引从 0 开始，只计算正文 `w:body` 的直属表格；行索引按目标表格的原始直属行计算。
@@ -35,7 +35,7 @@ python -I -S -B docx/scripts/edit_tables.py ./input.docx ./row.json ./edited.doc
 ## 同格式图片替换
 
 ```console
-python -I -S -B docx/scripts/replace_image.py ./input.docx ./new.png ./selection.json ./edited.docx
+python -I -S -B "<skill_dir>/scripts/replace_image.py" ./input.docx ./new.png ./selection.json ./edited.docx
 ```
 
 `selection.json` 必须提供：
@@ -67,8 +67,8 @@ with zipfile.ZipFile("./input.docx") as package:
 ## 验收
 
 ```console
-python -I -S -B docx/scripts/office/validate.py ./edited.docx
-python -I -S -B docx/scripts/read_docx.py ./edited.docx --format json -o ./edited-structure.json
+python -I -S -B "<skill_dir>/scripts/office/validate.py" ./edited.docx
+python -I -S -B "<skill_dir>/scripts/read_docx.py" ./edited.docx --format json -o ./edited-structure.json
 ```
 
 对照操作检查表格原行/表头顺序及新增文字，核对未修改部件字节。图片替换应仅目标 media 内容变化，所有其他成员逐字节相同。以上不替代 XSD、真实阅读器、图像解码或视觉验收。
